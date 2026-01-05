@@ -243,6 +243,16 @@ func (s *SDK) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLe
 	s.manager.ApplySnapshot(marketID, tokenID, bids, asks, sequence)
 }
 
+// IsOrderBookInitialized returns whether the orderbook for a token has received a snapshot
+func (s *SDK) IsOrderBookInitialized(tokenID string) bool {
+	return s.manager.IsOrderBookInitialized(tokenID)
+}
+
+// GetPendingDiffCount returns the number of pending diffs for a token (waiting for snapshot)
+func (s *SDK) GetPendingDiffCount(tokenID string) int {
+	return s.manager.GetPendingDiffCount(tokenID)
+}
+
 // HealthCheck returns true if the SDK is healthy
 func (s *SDK) HealthCheck() bool {
 	s.mu.RLock()

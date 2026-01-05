@@ -9,12 +9,14 @@ import (
 
 // OrderBook maintains the order book state for a single token
 type OrderBook struct {
-	mu       sync.RWMutex
-	tokenID  string
-	marketID int64
-	bids     map[string]*OrderSummary // price string -> order
-	asks     map[string]*OrderSummary // price string -> order
-	sequence int64
+	mu          sync.RWMutex
+	tokenID     string
+	marketID    int64
+	bids        map[string]*OrderSummary // price string -> order
+	asks        map[string]*OrderSummary // price string -> order
+	sequence    int64
+	initialized bool  // 是否已初始化（收到过快照）
+	timestamp   int64 // 上次更新时间戳（毫秒）
 }
 
 // NewOrderBook creates a new order book for a token
@@ -44,8 +46,22 @@ func (ob *OrderBook) Sequence() int64 {
 	return ob.sequence
 }
 
+// IsInitialized returns whether the orderbook has received a snapshot
+func (ob *OrderBook) IsInitialized() bool {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	return ob.initialized
+}
+
+// Timestamp returns the last update timestamp
+func (ob *OrderBook) Timestamp() int64 {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	return ob.timestamp
+}
+
 // ApplySnapshot applies a full orderbook snapshot
-func (ob *OrderBook) ApplySnapshot(bids, asks []PriceLevel, sequence int64) {
+func (ob *OrderBook) ApplySnapshot(bids, asks []PriceLevel, sequence int64, timestamp int64) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
@@ -74,16 +90,24 @@ func (ob *OrderBook) ApplySnapshot(bids, asks []PriceLevel, sequence int64) {
 	}
 
 	ob.sequence = sequence
+	ob.timestamp = timestamp
+	ob.initialized = true
 }
 
 // ApplyDiff applies incremental updates to the orderbook
-func (ob *OrderBook) ApplyDiff(bids, asks []PriceLevelDiff, sequence int64) {
+// Returns true if applied, false if skipped (not initialized or old sequence)
+func (ob *OrderBook) ApplyDiff(bids, asks []PriceLevelDiff, sequence int64, timestamp int64) bool {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
+	// Skip if not initialized (no snapshot received yet)
+	if !ob.initialized {
+		return false
+	}
+
 	// Only apply if sequence is newer
 	if sequence <= ob.sequence {
-		return
+		return false
 	}
 
 	// Apply bid updates
@@ -113,6 +137,8 @@ func (ob *OrderBook) ApplyDiff(bids, asks []PriceLevelDiff, sequence int64) {
 	}
 
 	ob.sequence = sequence
+	ob.timestamp = timestamp
+	return true
 }
 
 // GetBBO returns the best bid and offer
@@ -319,7 +345,7 @@ func (ob *OrderBook) TotalAskSize() decimal.Decimal {
 	return total
 }
 
-// Clear clears all orders from the orderbook
+// Clear clears all orders from the orderbook and resets initialized state
 func (ob *OrderBook) Clear() {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
@@ -327,6 +353,8 @@ func (ob *OrderBook) Clear() {
 	ob.bids = make(map[string]*OrderSummary)
 	ob.asks = make(map[string]*OrderSummary)
 	ob.sequence = 0
+	ob.timestamp = 0
+	ob.initialized = false
 }
 
 // Clone creates a deep copy of the orderbook
@@ -336,6 +364,8 @@ func (ob *OrderBook) Clone() *OrderBook {
 
 	clone := NewOrderBook(ob.marketID, ob.tokenID)
 	clone.sequence = ob.sequence
+	clone.timestamp = ob.timestamp
+	clone.initialized = ob.initialized
 
 	for k, v := range ob.bids {
 		clone.bids[k] = &OrderSummary{Price: v.Price, Size: v.Size}

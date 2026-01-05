@@ -237,3 +237,41 @@ go test ./orderbook/... -v
 - **Split**: 将 USDT 拆分为 YES + NO 代币
 - **Merge**: 将 YES + NO 代币合并为 USDT
 - **Redeem**: 从已结算市场赎回收益
+
+## OrderBook 数据一致性保障
+
+### 初始化机制
+- **initialized 状态**: 订单簿需要收到快照后才标记为已初始化
+- **pendingDiffs 缓冲**: 在快照到达前的增量更新会被缓冲，快照后按序列号重放
+- **序列号检查**: 只接受比当前序列号更新的增量更新
+- **时间戳追踪**: 记录最后更新时间戳
+
+### 重连处理
+- 断开连接时自动清空所有订单簿数据（`clearAllOrderBooks`）
+- 重连后重新订阅并等待新快照
+- pendingDiffs 同时清空，防止混合新旧数据
+
+### 获取订单簿数据
+```go
+// 获取完整深度（从内存）
+depth := sdk.GetDepth(tokenID, 50)
+
+// 获取所有买单/卖单
+allBids := sdk.GetAllBids(tokenID)
+allAsks := sdk.GetAllAsks(tokenID)
+
+// 扫描特定价格范围
+bidsAbove := sdk.ScanBidsAbove(tokenID, minPrice)
+asksBelow := sdk.ScanAsksBelow(tokenID, maxPrice)
+
+// 检查初始化状态
+if sdk.IsOrderBookInitialized(tokenID) {
+    // 订单簿已就绪
+}
+```
+
+### 重要提醒
+- **始终从 SDK 内存获取订单簿**: 使用 `GetDepth`/`GetAllBids`/`GetAllAsks`，不要调用 REST API
+- **检查初始化状态**: 使用前调用 `IsOrderBookInitialized(tokenID)` 确认订单簿已就绪
+- **处理深度而非仅 BBO**: 套利计算应考虑完整深度，使用 `ScanAsksBelow`/`ScanBidsAbove`
+- **ApplySnapshot 设置初始化**: 必须调用 `ApplySnapshot` 后订单簿才会被标记为已初始化

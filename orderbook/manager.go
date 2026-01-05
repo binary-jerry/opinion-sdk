@@ -11,22 +11,24 @@ import (
 
 // Manager manages orderbooks for multiple markets/tokens
 type Manager struct {
-	mu         sync.RWMutex
-	orderbooks map[string]*OrderBook // tokenID -> orderbook
-	prices     map[string]decimal.Decimal // tokenID -> last price
-	wsClient   *WSClient
-	eventChan  chan *Event
-	doneChan   chan struct{}
+	mu           sync.RWMutex
+	orderbooks   map[string]*OrderBook      // tokenID -> orderbook
+	prices       map[string]decimal.Decimal // tokenID -> last price
+	pendingDiffs map[string][]*DepthDiffMessage // tokenID -> pending diffs before snapshot
+	wsClient     *WSClient
+	eventChan    chan *Event
+	doneChan     chan struct{}
 }
 
 // NewManager creates a new orderbook manager
 func NewManager(wsClient *WSClient) *Manager {
 	return &Manager{
-		orderbooks: make(map[string]*OrderBook),
-		prices:     make(map[string]decimal.Decimal),
-		wsClient:   wsClient,
-		eventChan:  make(chan *Event, 100),
-		doneChan:   make(chan struct{}),
+		orderbooks:   make(map[string]*OrderBook),
+		prices:       make(map[string]decimal.Decimal),
+		pendingDiffs: make(map[string][]*DepthDiffMessage),
+		wsClient:     wsClient,
+		eventChan:    make(chan *Event, 100),
+		doneChan:     make(chan struct{}),
 	}
 }
 
@@ -73,9 +75,11 @@ func (m *Manager) handleEvent(event *Event) {
 	case EventConnected:
 		// Connection established
 	case EventDisconnected:
-		// Connection lost - orderbooks may be stale
+		// Connection lost - clear all orderbooks to ensure data consistency on reconnect
+		m.clearAllOrderBooks()
 	case EventReconnecting:
-		// Attempting to reconnect
+		// Attempting to reconnect - clear orderbooks to avoid stale data
+		m.clearAllOrderBooks()
 	}
 }
 
@@ -94,8 +98,19 @@ func (m *Manager) handleDepthUpdate(event *Event) {
 		m.orderbooks[diff.TokenID] = ob
 	}
 
-	// Convert PriceLevelDiff to proper format
-	ob.ApplyDiff(diff.Bids, diff.Asks, diff.Sequence)
+	// If orderbook is not initialized, buffer the diff
+	if !ob.IsInitialized() {
+		// Buffer pending diffs (limit to 1000 to prevent memory leak)
+		pending := m.pendingDiffs[diff.TokenID]
+		if len(pending) < 1000 {
+			m.pendingDiffs[diff.TokenID] = append(pending, diff)
+		}
+		return
+	}
+
+	// Apply the diff with current timestamp
+	timestamp := time.Now().UnixMilli()
+	ob.ApplyDiff(diff.Bids, diff.Asks, diff.Sequence, timestamp)
 }
 
 func (m *Manager) handlePriceUpdate(event *Event) {
@@ -284,6 +299,7 @@ func (m *Manager) GetTokenIDs() []string {
 }
 
 // ApplySnapshot applies a full orderbook snapshot for a token
+// It also applies any pending diffs that arrived before the snapshot
 func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLevel, sequence int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -294,7 +310,19 @@ func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []Pri
 		m.orderbooks[tokenID] = ob
 	}
 
-	ob.ApplySnapshot(bids, asks, sequence)
+	timestamp := time.Now().UnixMilli()
+	ob.ApplySnapshot(bids, asks, sequence, timestamp)
+
+	// Apply any pending diffs that are newer than the snapshot
+	if pending, exists := m.pendingDiffs[tokenID]; exists {
+		for _, diff := range pending {
+			if diff.Sequence > sequence {
+				ob.ApplyDiff(diff.Bids, diff.Asks, diff.Sequence, timestamp)
+			}
+		}
+		// Clear pending diffs after applying
+		delete(m.pendingDiffs, tokenID)
+	}
 }
 
 // HealthCheck returns true if the manager is healthy
@@ -395,4 +423,36 @@ func (m *Manager) String() string {
 
 	return fmt.Sprintf("Manager{orderbooks=%d, state=%s}",
 		len(m.orderbooks), m.wsClient.State())
+}
+
+// clearAllOrderBooks clears all orderbooks and pending diffs
+// Called on disconnect/reconnect to ensure data consistency
+func (m *Manager) clearAllOrderBooks() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, ob := range m.orderbooks {
+		ob.Clear()
+	}
+	// Clear all pending diffs
+	m.pendingDiffs = make(map[string][]*DepthDiffMessage)
+}
+
+// IsOrderBookInitialized returns whether the orderbook for a token is initialized
+func (m *Manager) IsOrderBookInitialized(tokenID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	ob, exists := m.orderbooks[tokenID]
+	if !exists {
+		return false
+	}
+	return ob.IsInitialized()
+}
+
+// GetPendingDiffCount returns the number of pending diffs for a token
+func (m *Manager) GetPendingDiffCount(tokenID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.pendingDiffs[tokenID])
 }
