@@ -4,8 +4,8 @@ import "time"
 
 // 默认配置常量
 const (
-	// DefaultAPIHost Opinion API 主机
-	DefaultAPIHost = "https://proxy.opinion.trade:8443"
+	// DefaultAPIHost Opinion OpenAPI 主机
+	DefaultAPIHost = "https://openapi.opinion.trade/openapi"
 
 	// DefaultChainID BNB Chain 主网
 	DefaultChainID = 56

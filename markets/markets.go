@@ -9,8 +9,9 @@ import (
 func (c *Client) GetMarkets(ctx context.Context, params *MarketListParams) (*MarketListResponse, error) {
 	if params == nil {
 		params = &MarketListParams{
-			Page:  1,
-			Limit: 20,
+			Page:     1,
+			PageSize: 20,
+			Status:   MarketStatusActive,
 		}
 	}
 
@@ -20,8 +21,8 @@ func (c *Client) GetMarkets(ctx context.Context, params *MarketListParams) (*Mar
 		return nil, fmt.Errorf("failed to get markets: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return &resp, nil
@@ -39,8 +40,8 @@ func (c *Client) GetMarket(ctx context.Context, marketID string) (*Market, error
 		return nil, fmt.Errorf("failed to get market: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return resp.Result, nil
@@ -58,8 +59,8 @@ func (c *Client) GetCategoricalMarket(ctx context.Context, marketID string) (*Ma
 		return nil, fmt.Errorf("failed to get categorical market: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return resp.Result, nil
@@ -83,8 +84,8 @@ func (c *Client) GetOrderbook(ctx context.Context, tokenID string) (*Orderbook, 
 		return nil, fmt.Errorf("failed to get orderbook: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return resp.Result, nil
@@ -108,8 +109,8 @@ func (c *Client) GetLatestPrice(ctx context.Context, tokenID string) (*LatestPri
 		return nil, fmt.Errorf("failed to get latest price: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return resp.Result, nil
@@ -127,8 +128,8 @@ func (c *Client) GetPriceHistory(ctx context.Context, params *PriceHistoryParams
 		return nil, fmt.Errorf("failed to get price history: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return resp.Result, nil
@@ -142,8 +143,8 @@ func (c *Client) GetQuoteTokens(ctx context.Context) ([]*QuoteToken, error) {
 		return nil, fmt.Errorf("failed to get quote tokens: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return resp.Result, nil
@@ -157,8 +158,8 @@ func (c *Client) GetFeeRates(ctx context.Context) (*FeeRates, error) {
 		return nil, fmt.Errorf("failed to get fee rates: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
 	return resp.Result, nil

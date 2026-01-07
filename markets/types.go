@@ -1,67 +1,110 @@
 package markets
 
-import "github.com/shopspring/decimal"
+import (
+	"fmt"
+
+	"github.com/shopspring/decimal"
+)
 
 // MarketStatus 市场状态
 type MarketStatus string
 
 const (
-	MarketStatusActive   MarketStatus = "active"
-	MarketStatusResolved MarketStatus = "resolved"
-	MarketStatusPaused   MarketStatus = "paused"
+	MarketStatusActive   MarketStatus = "activated" // 活跃
+	MarketStatusResolved MarketStatus = "resolved"  // 已结算
+	MarketStatusCreated  MarketStatus = "created"   // 已创建
 )
 
 // MarketType 市场类型
-type MarketType string
+type MarketType int
 
 const (
-	MarketTypeBinary      MarketType = "binary"      // 二元市场
-	MarketTypeCategorical MarketType = "categorical" // 多选市场
+	MarketTypeBinary      MarketType = 0 // 二元市场
+	MarketTypeCategorical MarketType = 1 // 多选市场
+	MarketTypeAll         MarketType = 2 // ALL
 )
 
 // APIResponse API 响应基础结构
 type APIResponse struct {
-	Code    int    `json:"code"`
-	Message string `json:"msg"`
+	ErrNo  int    `json:"errno"`
+	ErrMsg string `json:"errmsg"`
 }
 
-// Market 市场数据
+// IsSuccess 检查 API 是否成功
+func (r *APIResponse) IsSuccess() bool {
+	return r.ErrNo == 0
+}
+
+// Market 市场数据 (匹配 Opinion OpenAPI 响应)
 type Market struct {
-	ID              string         `json:"id"`
-	Question        string         `json:"question"`
-	Description     string         `json:"description"`
-	Type            MarketType     `json:"type"`
-	Status          MarketStatus   `json:"status"`
-	Resolution      string         `json:"resolution,omitempty"`
-	CreatedAt       string         `json:"createdAt"`
-	EndAt           string         `json:"endAt"`
-	ResolvedAt      string         `json:"resolvedAt,omitempty"`
-	QuoteTokenID    string         `json:"quoteTokenId"`
-	QuoteToken      *QuoteToken    `json:"quoteToken,omitempty"`
-	Volume          decimal.Decimal `json:"volume"`
-	Liquidity       decimal.Decimal `json:"liquidity"`
-	Tokens          []*Token       `json:"tokens,omitempty"`
-	ChildMarkets    []*ChildMarket `json:"childMarkets,omitempty"`
-	Category        string         `json:"category,omitempty"`
-	Tags            []string       `json:"tags,omitempty"`
-	ImageURL        string         `json:"imageUrl,omitempty"`
+	MarketID      int64           `json:"marketId"`
+	MarketTitle   string          `json:"marketTitle"`
+	StatusEnum    string          `json:"statusEnum"`
+	MarketType    MarketType      `json:"marketType"`
+	ChildMarkets  []*ChildMarket  `json:"childMarkets,omitempty"`
+	YesLabel      string          `json:"yesLabel"`
+	NoLabel       string          `json:"noLabel"`
+	Rules         string          `json:"rules"`
+	YesTokenID    string          `json:"yesTokenId"`
+	NoTokenID     string          `json:"noTokenId"`
+	ConditionID   string          `json:"conditionId"`
+	ResultTokenID string          `json:"resultTokenId"`
+	Volume        decimal.Decimal `json:"volume"`
+	Volume24h     decimal.Decimal `json:"volume24h"`
+	Volume7d      decimal.Decimal `json:"volume7d"`
+	QuoteToken    string          `json:"quoteToken"`
+	ChainID       string          `json:"chainId"`
+	QuestionID    string          `json:"questionId"`
+	CreatedAt     int64           `json:"createdAt"`
+	CutoffAt      int64           `json:"cutoffAt"`
+	ResolvedAt    int64           `json:"resolvedAt"`
+}
+
+// GetID 返回市场 ID 字符串
+func (m *Market) GetID() string {
+	return fmt.Sprintf("%d", m.MarketID)
 }
 
 // ChildMarket 子市场 (用于多选市场)
 type ChildMarket struct {
-	ID       string  `json:"id"`
-	Question string  `json:"question"`
-	Tokens   []*Token `json:"tokens,omitempty"`
+	MarketID      int64           `json:"marketId"`
+	MarketTitle   string          `json:"marketTitle"`
+	Status        int             `json:"status"`
+	StatusEnum    string          `json:"statusEnum"`
+	YesLabel      string          `json:"yesLabel"`
+	NoLabel       string          `json:"noLabel"`
+	Rules         string          `json:"rules"`
+	YesTokenID    string          `json:"yesTokenId"`
+	NoTokenID     string          `json:"noTokenId"`
+	ConditionID   string          `json:"conditionId"`
+	ResultTokenID string          `json:"resultTokenId"`
+	Volume        decimal.Decimal `json:"volume"`
+	QuoteToken    string          `json:"quoteToken"`
+	ChainID       string          `json:"chainId"`
+	QuestionID    string          `json:"questionId"`
+	CreatedAt     int64           `json:"createdAt"`
+	CutoffAt      int64           `json:"cutoffAt"`
+	ResolvedAt    int64           `json:"resolvedAt"`
+}
+
+// GetID 返回子市场 ID 字符串
+func (c *ChildMarket) GetID() string {
+	return fmt.Sprintf("%d", c.MarketID)
+}
+
+// IsResolved 检查子市场是否已结算
+func (c *ChildMarket) IsResolved() bool {
+	return c.Status == 4
 }
 
 // Token 代币数据
 type Token struct {
-	ID        string          `json:"id"`
-	TokenID   string          `json:"tokenId"`
-	Outcome   string          `json:"outcome"`
-	Price     decimal.Decimal `json:"price"`
-	Volume    decimal.Decimal `json:"volume"`
-	MarketID  string          `json:"marketId"`
+	ID       string          `json:"id"`
+	TokenID  string          `json:"tokenId"`
+	Outcome  string          `json:"outcome"`
+	Price    decimal.Decimal `json:"price"`
+	Volume   decimal.Decimal `json:"volume"`
+	MarketID string          `json:"marketId"`
 }
 
 // QuoteToken 报价代币 (USDT)
@@ -75,15 +118,15 @@ type QuoteToken struct {
 
 // Orderbook 订单簿
 type Orderbook struct {
-	TokenID string           `json:"tokenId"`
+	TokenID string            `json:"tokenId"`
 	Bids    []*OrderbookLevel `json:"bids"`
 	Asks    []*OrderbookLevel `json:"asks"`
 }
 
 // OrderbookLevel 订单簿层级
 type OrderbookLevel struct {
-	Price  decimal.Decimal `json:"price"`
-	Size   decimal.Decimal `json:"size"`
+	Price decimal.Decimal `json:"price"`
+	Size  decimal.Decimal `json:"size"`
 }
 
 // LatestPrice 最新价格
@@ -117,21 +160,20 @@ type FeeRates struct {
 
 // MarketListParams 市场列表查询参数
 type MarketListParams struct {
-	Page     int          `url:"page,omitempty"`
-	Limit    int          `url:"limit,omitempty"`
-	Status   MarketStatus `url:"status,omitempty"`
-	Type     MarketType   `url:"type,omitempty"`
-	Category string       `url:"category,omitempty"`
+	Page       int          `url:"page,omitempty"`
+	PageSize   int          `url:"limit,omitempty"`
+	Status     MarketStatus `url:"status,omitempty"`
+	MarketType MarketType   `url:"marketType,omitempty"`
+	ChainId    int          `url:"chainId,omitempty"`
+	SortBy     int          `url:"sortBy,omitempty"`
 }
 
 // MarketListResponse 市场列表响应
 type MarketListResponse struct {
 	APIResponse
 	Result struct {
-		Markets []*Market `json:"markets"`
-		Total   int       `json:"total"`
-		Page    int       `json:"page"`
-		Limit   int       `json:"limit"`
+		Total int       `json:"total"`
+		List  []*Market `json:"list"`
 	} `json:"result"`
 }
 
