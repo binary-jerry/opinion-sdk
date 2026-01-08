@@ -3,16 +3,26 @@ package orderbook
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
 
+// SnapshotFetcher 定义获取订单簿快照的接口
+// 这允许外部注入 markets.Client 来获取快照
+type SnapshotFetcher interface {
+	// GetOrderbookSnapshot 获取指定 tokenID 的订单簿快照
+	GetOrderbookSnapshot(ctx context.Context, tokenID string) (bids, asks []PriceLevel, err error)
+}
+
 // SDK provides a high-level interface for managing orderbooks via WebSocket
 type SDK struct {
-	config   *Config
-	wsClient *WSClient
-	manager  *Manager
+	config          *Config
+	wsClient        *WSClient
+	manager         *Manager
+	snapshotFetcher SnapshotFetcher
 
 	mu          sync.RWMutex
 	ctx         context.Context
@@ -34,6 +44,14 @@ func NewSDK(config *Config) *SDK {
 		wsClient: wsClient,
 		manager:  manager,
 	}
+}
+
+// SetSnapshotFetcher 设置快照获取器
+// 必须在订阅前调用，否则订单簿无法正确初始化
+func (s *SDK) SetSnapshotFetcher(fetcher SnapshotFetcher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshotFetcher = fetcher
 }
 
 // Start connects to the WebSocket and begins processing events
@@ -87,6 +105,93 @@ func (s *SDK) Stop() error {
 // Subscribe subscribes to orderbook updates for a market
 func (s *SDK) Subscribe(marketID int64) error {
 	return s.wsClient.SubscribeDepth(marketID)
+}
+
+// SubscribeWithSnapshot 订阅订单簿更新并自动获取初始快照
+// 这是推荐的订阅方式，确保订单簿能正确初始化
+// tokenID 是需要订阅的 token ID (yesTokenId 或 noTokenId)
+func (s *SDK) SubscribeWithSnapshot(ctx context.Context, marketID int64, tokenID string) error {
+	s.mu.RLock()
+	fetcher := s.snapshotFetcher
+	s.mu.RUnlock()
+
+	if fetcher == nil {
+		return fmt.Errorf("snapshot fetcher not set, call SetSnapshotFetcher first")
+	}
+
+	// 1. 先订阅 WebSocket 增量更新
+	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
+		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
+	}
+
+	// 2. 获取订单簿快照
+	bids, asks, err := fetcher.GetOrderbookSnapshot(ctx, tokenID)
+	if err != nil {
+		log.Printf("[OrderbookSDK] Warning: failed to get snapshot for token %s: %v", tokenID, err)
+		// 不返回错误，让 WebSocket 继续工作，等待后续数据
+		return nil
+	}
+
+	// 3. 应用快照到订单簿
+	s.manager.ApplySnapshot(marketID, tokenID, bids, asks, time.Now().UnixMilli())
+	log.Printf("[OrderbookSDK] Applied snapshot for token %s: %d bids, %d asks", tokenID, len(bids), len(asks))
+
+	return nil
+}
+
+// SubscribeMarketWithSnapshot 订阅整个市场（YES 和 NO 两个 token）并自动获取快照
+// 这是最方便的订阅方式，适用于二元市场
+func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, yesTokenID, noTokenID string) error {
+	s.mu.RLock()
+	fetcher := s.snapshotFetcher
+	s.mu.RUnlock()
+
+	if fetcher == nil {
+		return fmt.Errorf("snapshot fetcher not set, call SetSnapshotFetcher first")
+	}
+
+	// 1. 订阅 WebSocket
+	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
+		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
+	}
+
+	// 2. 并行获取两个 token 的快照
+	var wg sync.WaitGroup
+	var yesErr, noErr error
+	var yesBids, yesAsks, noBids, noAsks []PriceLevel
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		yesBids, yesAsks, yesErr = fetcher.GetOrderbookSnapshot(ctx, yesTokenID)
+	}()
+
+	go func() {
+		defer wg.Done()
+		noBids, noAsks, noErr = fetcher.GetOrderbookSnapshot(ctx, noTokenID)
+	}()
+
+	wg.Wait()
+
+	// 3. 应用快照
+	timestamp := time.Now().UnixMilli()
+
+	if yesErr != nil {
+		log.Printf("[OrderbookSDK] Warning: failed to get YES snapshot for token %s: %v", yesTokenID, yesErr)
+	} else {
+		s.manager.ApplySnapshot(marketID, yesTokenID, yesBids, yesAsks, timestamp)
+		log.Printf("[OrderbookSDK] Applied YES snapshot for token %s: %d bids, %d asks", yesTokenID, len(yesBids), len(yesAsks))
+	}
+
+	if noErr != nil {
+		log.Printf("[OrderbookSDK] Warning: failed to get NO snapshot for token %s: %v", noTokenID, noErr)
+	} else {
+		s.manager.ApplySnapshot(marketID, noTokenID, noBids, noAsks, timestamp)
+		log.Printf("[OrderbookSDK] Applied NO snapshot for token %s: %d bids, %d asks", noTokenID, len(noBids), len(noAsks))
+	}
+
+	return nil
 }
 
 // SubscribePrice subscribes to price updates for a market
