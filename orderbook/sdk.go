@@ -526,11 +526,19 @@ func (s *SDK) GetHealthStatus() *HealthStatus {
 // StartPeriodicValidation starts periodic orderbook validation
 // interval: how often to validate (recommended: 30-60 seconds)
 // This fetches fresh snapshots from the API and corrects any drift
+// Note: Must be called after Start(), otherwise it will do nothing
 func (s *SDK) StartPeriodicValidation(interval time.Duration) {
 	s.mu.Lock()
 	if s.validationCancel != nil {
 		s.mu.Unlock()
 		return // Already running
+	}
+
+	// 检查 SDK 是否已启动
+	if !s.started || s.ctx == nil {
+		s.mu.Unlock()
+		log.Printf("[OrderbookSDK] Warning: StartPeriodicValidation called before Start(), ignoring")
+		return
 	}
 
 	ctx, cancel := context.WithCancel(s.ctx)

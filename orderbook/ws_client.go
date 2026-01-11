@@ -29,6 +29,7 @@ type WSClient struct {
 	writeChan     chan []byte
 	doneChan      chan struct{}
 	closeChan     chan struct{}
+	closeOnce     sync.Once // 确保 closeChan 只关闭一次
 
 	reconnectAttempts int
 	lastError         error
@@ -121,7 +122,10 @@ func (c *WSClient) Disconnect() error {
 		return nil
 	}
 
-	close(c.closeChan)
+	// 使用 sync.Once 确保 closeChan 只关闭一次
+	c.closeOnce.Do(func() {
+		close(c.closeChan)
+	})
 
 	if c.conn != nil {
 		c.conn.Close()
@@ -530,6 +534,12 @@ func (c *WSClient) reconnect() {
 		// Reconnected successfully
 		c.setState(StateConnected)
 		c.reconnectAttempts = 0
+
+		// 重新创建 closeChan 和 closeOnce，以便新的 goroutine 可以正常工作
+		c.mu.Lock()
+		c.closeChan = make(chan struct{})
+		c.closeOnce = sync.Once{}
+		c.mu.Unlock()
 
 		// Restart loops
 		go c.readLoop()

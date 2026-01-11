@@ -1,6 +1,8 @@
 package orderbook
 
 import (
+	"fmt"
+
 	"github.com/shopspring/decimal"
 )
 
@@ -289,7 +291,7 @@ type Subscription struct {
 // SubscriptionKey generates a unique key for a subscription
 func (s *Subscription) Key() string {
 	if s.MarketID > 0 {
-		return s.Channel + ":" + string(rune(s.MarketID))
+		return fmt.Sprintf("%s:%d", s.Channel, s.MarketID)
 	}
 	return s.Channel
 }

@@ -77,15 +77,27 @@ func TestSubscriptionKey(t *testing.T) {
 		expected string
 	}{
 		{&Subscription{Channel: "market.depth.diff", MarketID: 0}, "market.depth.diff"},
-		{&Subscription{Channel: "market.depth.diff", MarketID: 123}, "market.depth.diff:{"},
+		{&Subscription{Channel: "market.depth.diff", MarketID: 123}, "market.depth.diff:123"},
+		{&Subscription{Channel: "market.depth.diff", MarketID: 3892}, "market.depth.diff:3892"},
+		{&Subscription{Channel: "market.last.price", MarketID: 99999}, "market.last.price:99999"},
 		{&Subscription{Channel: "trade.order.update", MarketID: 0}, "trade.order.update"},
+		// 测试大数字确保正确转换
+		{&Subscription{Channel: "market.depth.diff", MarketID: 123456789}, "market.depth.diff:123456789"},
 	}
 
 	for i, tt := range tests {
 		got := tt.sub.Key()
-		if tt.sub.MarketID == 0 && got != tt.expected {
-			t.Errorf("Test %d: Key() = %s, want %s", i, got, tt.expected)
+		if got != tt.expected {
+			t.Errorf("Test %d: Key() = %q, want %q", i, got, tt.expected)
 		}
+	}
+
+	// 确保不同的 marketID 产生不同的 key
+	sub1 := &Subscription{Channel: "market.depth.diff", MarketID: 3892}
+	sub2 := &Subscription{Channel: "market.depth.diff", MarketID: 3893}
+	if sub1.Key() == sub2.Key() {
+		t.Errorf("Different marketIDs should produce different keys: %s == %s",
+			sub1.Key(), sub2.Key())
 	}
 }
 
@@ -382,3 +394,4 @@ func TestServerMessage(t *testing.T) {
 		t.Errorf("Event = %s, want subscribed", msg.Event)
 	}
 }
+
