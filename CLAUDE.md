@@ -17,8 +17,14 @@ Opinion SDK 是一个 Go 语言编写的完整 Opinion 预测市场 SDK，提供
 # 构建
 go build ./...
 
-# 运行测试
+# 运行所有测试
 go test ./...
+
+# 运行单个模块测试
+go test ./orderbook/... -v
+
+# 运行单个测试函数
+go test ./orderbook/... -v -run TestOrderBook_ApplyDiff
 
 # 运行测试（带覆盖率）
 go test ./... -cover
@@ -35,6 +41,8 @@ go run examples/markets/main.go
 # 运行交易示例（需要私钥）
 go run examples/trading/main.go
 ```
+
+**Go 版本要求**: 1.21+
 
 ## Architecture
 
@@ -128,20 +136,32 @@ config.APIKey = "your-api-key"
 // 创建订单簿 SDK
 sdk := orderbook.NewSDK(config)
 
-// 连接并订阅
+// 设置快照获取器（必须在订阅前设置）
+sdk.SetSnapshotFetcher(snapshotFetcher)
+
+// 连接并启动
 ctx := context.Background()
 sdk.Start(ctx)
 defer sdk.Stop()
 
-// 订阅市场
-sdk.Subscribe(1274) // marketID
+// 推荐方式：订阅整个市场（YES + NO）并自动获取快照
+sdk.SubscribeMarketWithSnapshot(ctx, marketID, yesTokenID, noTokenID)
 
-// 获取 BBO
-bbo := sdk.GetBBO("token-id")
-fmt.Printf("Best Bid: %s, Best Ask: %s\n", bbo.BestBid.Price, bbo.BestAsk.Price)
+// 或者：仅订阅单个 token
+sdk.SubscribeWithSnapshot(ctx, marketID, tokenID)
 
-// 获取深度
-depth := sdk.GetDepth("token-id", 10)
+// 检查订单簿是否已初始化
+if sdk.IsOrderBookInitialized(tokenID) {
+    // 获取 BBO
+    bbo := sdk.GetBBO(tokenID)
+
+    // 获取完整深度
+    depth := sdk.GetDepth(tokenID, 50)
+
+    // 扫描价格范围
+    asks := sdk.ScanAsksBelow(tokenID, maxPrice)
+    bids := sdk.ScanBidsAbove(tokenID, minPrice)
+}
 
 // 监听事件
 for event := range sdk.Events() {
@@ -150,8 +170,8 @@ for event := range sdk.Events() {
         // 处理深度更新
     case orderbook.EventPriceUpdate:
         // 处理价格更新
-    case orderbook.EventTradeUpdate:
-        // 处理交易更新
+    case orderbook.EventReconnected:
+        // 重连后会自动刷新快照
     }
 }
 ```
@@ -174,7 +194,7 @@ Opinion 使用 API Key 认证：
 | 配置 | 值 |
 |------|------|
 | Chain ID | 56 (BNB Chain) |
-| API Host | https://proxy.opinion.trade:8443 |
+| API Host | https://openapi.opinion.trade/openapi |
 | WebSocket | wss://ws.opinion.trade |
 | Rate Limit | 15 requests/second |
 
@@ -196,12 +216,15 @@ Opinion 使用 API Key 认证：
 
 ## Testing
 
-运行特定模块测试：
 ```bash
+# 运行特定模块测试
 go test ./auth/... -v
 go test ./clob/... -v
 go test ./common/... -v
 go test ./orderbook/... -v
+
+# 运行单个测试
+go test ./orderbook/... -v -run TestManager_ApplySnapshot
 ```
 
 ### WebSocket Channels

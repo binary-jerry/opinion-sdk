@@ -100,6 +100,11 @@ func (m *Manager) handleDepthUpdate(event *Event) {
 		return
 	}
 
+	// Validate tokenID to avoid creating invalid orderbooks
+	if diff.TokenID == "" {
+		return
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -149,6 +154,11 @@ func (m *Manager) handleSingleDepthDiff(msg *SingleDepthDiffMessage) {
 	} else {
 		// No pair registered, just use the tokenID from message
 		currentTokenID = msg.TokenID
+	}
+
+	// Validate tokenID to avoid creating invalid orderbooks with empty key
+	if currentTokenID == "" {
+		return
 	}
 
 	// Get or create orderbook for current token
