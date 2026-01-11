@@ -11,24 +11,28 @@ import (
 
 // Manager manages orderbooks for multiple markets/tokens
 type Manager struct {
-	mu           sync.RWMutex
-	orderbooks   map[string]*OrderBook      // tokenID -> orderbook
-	prices       map[string]decimal.Decimal // tokenID -> last price
-	pendingDiffs map[string][]*DepthDiffMessage // tokenID -> pending diffs before snapshot
-	wsClient     *WSClient
-	eventChan    chan *Event
-	doneChan     chan struct{}
+	mu               sync.RWMutex
+	orderbooks       map[string]*OrderBook           // tokenID -> orderbook
+	prices           map[string]decimal.Decimal      // tokenID -> last price
+	pendingDiffs     map[string][]*SingleDepthDiffMessage // tokenID -> pending diffs before snapshot
+	marketTokenPairs map[int64]*MarketTokenPair      // marketID -> token pair (for mirror sync)
+	tokenToMarket    map[string]int64                // tokenID -> marketID (reverse lookup)
+	wsClient         *WSClient
+	eventChan        chan *Event
+	doneChan         chan struct{}
 }
 
 // NewManager creates a new orderbook manager
 func NewManager(wsClient *WSClient) *Manager {
 	return &Manager{
-		orderbooks:   make(map[string]*OrderBook),
-		prices:       make(map[string]decimal.Decimal),
-		pendingDiffs: make(map[string][]*DepthDiffMessage),
-		wsClient:     wsClient,
-		eventChan:    make(chan *Event, 100),
-		doneChan:     make(chan struct{}),
+		orderbooks:       make(map[string]*OrderBook),
+		prices:           make(map[string]decimal.Decimal),
+		pendingDiffs:     make(map[string][]*SingleDepthDiffMessage),
+		marketTokenPairs: make(map[int64]*MarketTokenPair),
+		tokenToMarket:    make(map[string]int64),
+		wsClient:         wsClient,
+		eventChan:        make(chan *Event, 100),
+		doneChan:         make(chan struct{}),
 	}
 }
 
@@ -84,6 +88,13 @@ func (m *Manager) handleEvent(event *Event) {
 }
 
 func (m *Manager) handleDepthUpdate(event *Event) {
+	// Handle SingleDepthDiffMessage (actual WebSocket format)
+	if singleDiff, ok := event.Data.(*SingleDepthDiffMessage); ok {
+		m.handleSingleDepthDiff(singleDiff)
+		return
+	}
+
+	// Handle legacy DepthDiffMessage format (backward compatibility)
 	diff, ok := event.Data.(*DepthDiffMessage)
 	if !ok {
 		return
@@ -98,19 +109,105 @@ func (m *Manager) handleDepthUpdate(event *Event) {
 		m.orderbooks[diff.TokenID] = ob
 	}
 
-	// If orderbook is not initialized, buffer the diff
+	// If orderbook is not initialized, skip (no buffering for legacy format)
 	if !ob.IsInitialized() {
-		// Buffer pending diffs (limit to 1000 to prevent memory leak)
-		pending := m.pendingDiffs[diff.TokenID]
-		if len(pending) < 1000 {
-			m.pendingDiffs[diff.TokenID] = append(pending, diff)
-		}
 		return
 	}
 
 	// Apply the diff with current timestamp
 	timestamp := time.Now().UnixMilli()
 	ob.ApplyDiff(diff.Bids, diff.Asks, diff.Sequence, timestamp)
+}
+
+// handleSingleDepthDiff processes a single price level update with mirror sync
+func (m *Manager) handleSingleDepthDiff(msg *SingleDepthDiffMessage) {
+	price, err := decimal.NewFromString(msg.Price)
+	if err != nil {
+		return
+	}
+	size, err := decimal.NewFromString(msg.Size)
+	if err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Get the market token pair for mirror sync
+	pair := m.marketTokenPairs[msg.MarketID]
+
+	// Determine current token and mirror token
+	var currentTokenID, mirrorTokenID string
+	if pair != nil {
+		if msg.OutcomeSide == OutcomeSideYES {
+			currentTokenID = pair.YesTokenID
+			mirrorTokenID = pair.NoTokenID
+		} else {
+			currentTokenID = pair.NoTokenID
+			mirrorTokenID = pair.YesTokenID
+		}
+	} else {
+		// No pair registered, just use the tokenID from message
+		currentTokenID = msg.TokenID
+	}
+
+	// Get or create orderbook for current token
+	ob, exists := m.orderbooks[currentTokenID]
+	if !exists {
+		ob = NewOrderBook(msg.MarketID, currentTokenID)
+		m.orderbooks[currentTokenID] = ob
+	}
+
+	// If orderbook is not initialized, buffer the diff
+	if !ob.IsInitialized() {
+		pending := m.pendingDiffs[currentTokenID]
+		if len(pending) < 1000 {
+			m.pendingDiffs[currentTokenID] = append(pending, msg)
+		}
+		return
+	}
+
+	// Apply update to current token's orderbook
+	m.applyPriceUpdate(currentTokenID, msg.Side, price, size)
+
+	// Mirror sync: update the other token's orderbook
+	if mirrorTokenID != "" {
+		mirrorOb, exists := m.orderbooks[mirrorTokenID]
+		if exists && mirrorOb.IsInitialized() {
+			// Mirror price: NO = 1 - YES
+			mirrorPrice := decimal.NewFromInt(1).Sub(price)
+			// Mirror side: asks <-> bids
+			mirrorSide := m.getMirrorSide(msg.Side)
+			m.applyPriceUpdate(mirrorTokenID, mirrorSide, mirrorPrice, size)
+		}
+	}
+}
+
+// applyPriceUpdate applies a single price level update to an orderbook
+func (m *Manager) applyPriceUpdate(tokenID, side string, price, size decimal.Decimal) {
+	ob, exists := m.orderbooks[tokenID]
+	if !exists || !ob.IsInitialized() {
+		return
+	}
+
+	timestamp := time.Now().UnixMilli()
+
+	// Create a single-element diff
+	diff := PriceLevelDiff{Price: price, Size: size}
+
+	if side == "bids" {
+		ob.ApplyDiff([]PriceLevelDiff{diff}, nil, 0, timestamp)
+	} else {
+		ob.ApplyDiff(nil, []PriceLevelDiff{diff}, 0, timestamp)
+	}
+}
+
+// getMirrorSide returns the opposite side
+func (m *Manager) getMirrorSide(side string) string {
+	if side == "asks" {
+		return "bids"
+	}
+	return "asks"
 }
 
 func (m *Manager) handlePriceUpdate(event *Event) {
@@ -299,8 +396,8 @@ func (m *Manager) GetTokenIDs() []string {
 }
 
 // ApplySnapshot applies a full orderbook snapshot for a token
-// It also applies any pending diffs that arrived before the snapshot
-func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLevel, sequence int64) {
+// Since there's no sequence in the API, we discard all pending diffs after applying snapshot
+func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLevel, timestamp int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -310,24 +407,87 @@ func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []Pri
 		m.orderbooks[tokenID] = ob
 	}
 
-	timestamp := time.Now().UnixMilli()
-	ob.ApplySnapshot(bids, asks, sequence, timestamp)
+	// Apply snapshot with sequence=0 (not used)
+	ob.ApplySnapshot(bids, asks, 0, timestamp)
 
-	// Apply any pending diffs that are newer than the snapshot
-	if pending, exists := m.pendingDiffs[tokenID]; exists {
-		for _, diff := range pending {
-			if diff.Sequence > sequence {
-				ob.ApplyDiff(diff.Bids, diff.Asks, diff.Sequence, timestamp)
-			}
-		}
-		// Clear pending diffs after applying
-		delete(m.pendingDiffs, tokenID)
-	}
+	// Discard all pending diffs - since there's no sequence, we can't determine order
+	// The orderbook will converge to correct state with subsequent updates
+	delete(m.pendingDiffs, tokenID)
 }
 
 // HealthCheck returns true if the manager is healthy
+// Checks: WebSocket connected, at least one initialized orderbook, no stale data
 func (m *Manager) HealthCheck() bool {
-	return m.wsClient.State() == StateConnected
+	if m.wsClient.State() != StateConnected {
+		return false
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// If no orderbooks registered yet, consider healthy
+	if len(m.orderbooks) == 0 {
+		return true
+	}
+
+	now := time.Now().UnixMilli()
+	staleThreshold := int64(5 * 60 * 1000) // 5 minutes
+
+	for _, ob := range m.orderbooks {
+		if !ob.IsInitialized() {
+			continue
+		}
+		// At least one initialized orderbook, check if it's stale
+		if now-ob.Timestamp() > staleThreshold {
+			return false
+		}
+		return true // At least one healthy orderbook
+	}
+
+	// No initialized orderbooks
+	return false
+}
+
+// GetHealthStatus returns detailed health status for all orderbooks
+func (m *Manager) GetHealthStatus() *HealthStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now().UnixMilli()
+	staleThreshold := int64(5 * 60 * 1000) // 5 minutes
+
+	status := &HealthStatus{
+		Connected:      m.wsClient.State() == StateConnected,
+		OrderBookCount: len(m.orderbooks),
+		OrderBooks:     make([]OrderBookHealth, 0, len(m.orderbooks)),
+	}
+
+	for tokenID, ob := range m.orderbooks {
+		health := OrderBookHealth{
+			TokenID:     tokenID,
+			Initialized: ob.IsInitialized(),
+			LastUpdate:  ob.Timestamp(),
+			BidCount:    ob.BidCount(),
+			AskCount:    ob.AskCount(),
+		}
+
+		if ob.Timestamp() > 0 {
+			health.StaleSeconds = (now - ob.Timestamp()) / 1000
+			health.IsStale = now-ob.Timestamp() > staleThreshold
+		}
+
+		if !health.Initialized {
+			status.UninitializedCount++
+		} else if health.IsStale {
+			status.StaleCount++
+		} else {
+			status.HealthyCount++
+		}
+
+		status.OrderBooks = append(status.OrderBooks, health)
+	}
+
+	return status
 }
 
 // GetConnectionState returns the WebSocket connection state
@@ -435,7 +595,7 @@ func (m *Manager) clearAllOrderBooks() {
 		ob.Clear()
 	}
 	// Clear all pending diffs
-	m.pendingDiffs = make(map[string][]*DepthDiffMessage)
+	m.pendingDiffs = make(map[string][]*SingleDepthDiffMessage)
 }
 
 // IsOrderBookInitialized returns whether the orderbook for a token is initialized
@@ -455,4 +615,66 @@ func (m *Manager) GetPendingDiffCount(tokenID string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.pendingDiffs[tokenID])
+}
+
+// RegisterMarketTokenPair registers a YES/NO token pair for a market
+// This enables mirror sync between YES and NO orderbooks
+func (m *Manager) RegisterMarketTokenPair(pair *MarketTokenPair) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.marketTokenPairs[pair.MarketID] = pair
+	m.tokenToMarket[pair.YesTokenID] = pair.MarketID
+	m.tokenToMarket[pair.NoTokenID] = pair.MarketID
+}
+
+// GetMarketTokenPair returns the token pair for a market
+func (m *Manager) GetMarketTokenPair(marketID int64) *MarketTokenPair {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.marketTokenPairs[marketID]
+}
+
+// GetAllMarketTokenPairs returns all registered token pairs
+func (m *Manager) GetAllMarketTokenPairs() []*MarketTokenPair {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	pairs := make([]*MarketTokenPair, 0, len(m.marketTokenPairs))
+	for _, pair := range m.marketTokenPairs {
+		pairs = append(pairs, pair)
+	}
+	return pairs
+}
+
+// MarkUninitialized marks an orderbook as uninitialized
+// Used when reconnecting to trigger snapshot refresh
+func (m *Manager) MarkUninitialized(tokenID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ob, exists := m.orderbooks[tokenID]; exists {
+		ob.Clear()
+	}
+}
+
+// GetMirrorTokenID returns the mirror token ID for a given token
+func (m *Manager) GetMirrorTokenID(tokenID string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	marketID, exists := m.tokenToMarket[tokenID]
+	if !exists {
+		return ""
+	}
+
+	pair := m.marketTokenPairs[marketID]
+	if pair == nil {
+		return ""
+	}
+
+	if tokenID == pair.YesTokenID {
+		return pair.NoTokenID
+	}
+	return pair.YesTokenID
 }

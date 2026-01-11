@@ -36,6 +36,7 @@ const (
 	EventConnected EventType = iota
 	EventDisconnected
 	EventReconnecting
+	EventReconnected // New: fired after successful reconnection
 	EventSubscribed
 	EventUnsubscribed
 	EventDepthUpdate
@@ -54,6 +55,8 @@ func (e EventType) String() string {
 		return "disconnected"
 	case EventReconnecting:
 		return "reconnecting"
+	case EventReconnected:
+		return "reconnected"
 	case EventSubscribed:
 		return "subscribed"
 	case EventUnsubscribed:
@@ -139,8 +142,33 @@ type DepthDiffMessage struct {
 
 // PriceLevelDiff represents a price level change (size=0 means remove)
 type PriceLevelDiff struct {
-	Price  decimal.Decimal `json:"price"`
-	Size   decimal.Decimal `json:"size"`
+	Price decimal.Decimal `json:"price"`
+	Size  decimal.Decimal `json:"size"`
+}
+
+// SingleDepthDiffMessage represents a single price level update (actual WebSocket format)
+// This is the real format from Opinion WebSocket, not bids/asks arrays
+type SingleDepthDiffMessage struct {
+	MsgType     string `json:"msgType"`     // "market.depth.diff"
+	MarketID    int64  `json:"marketId"`
+	TokenID     string `json:"tokenId"`
+	OutcomeSide int    `json:"outcomeSide"` // 1=YES, 0=NO
+	Side        string `json:"side"`        // "bids" or "asks"
+	Price       string `json:"price"`
+	Size        string `json:"size"`
+}
+
+// OutcomeSide constants
+const (
+	OutcomeSideNO  = 0
+	OutcomeSideYES = 1
+)
+
+// MarketTokenPair represents the YES/NO token pair for a market
+type MarketTokenPair struct {
+	MarketID   int64
+	YesTokenID string
+	NoTokenID  string
 }
 
 // LastPriceMessage represents a price update message
@@ -264,4 +292,35 @@ func (s *Subscription) Key() string {
 		return s.Channel + ":" + string(rune(s.MarketID))
 	}
 	return s.Channel
+}
+
+// OrderBookHealth represents the health status of an orderbook
+type OrderBookHealth struct {
+	TokenID       string
+	Initialized   bool
+	LastUpdate    int64 // Unix milliseconds
+	BidCount      int
+	AskCount      int
+	IsStale       bool  // True if no update for too long
+	StaleSeconds  int64 // Seconds since last update
+}
+
+// HealthStatus represents the overall health of the SDK
+type HealthStatus struct {
+	Connected        bool
+	OrderBookCount   int
+	HealthyCount     int
+	UninitializedCount int
+	StaleCount       int
+	OrderBooks       []OrderBookHealth
+}
+
+// ValidationResult represents the result of orderbook validation
+type ValidationResult struct {
+	TokenID       string
+	Valid         bool
+	BidDifference int // Number of bid levels that differ
+	AskDifference int // Number of ask levels that differ
+	Corrected     bool
+	Error         error
 }

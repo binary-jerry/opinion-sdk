@@ -2,9 +2,14 @@ package orderbook
 
 import (
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
+
+func nowMs() int64 {
+	return time.Now().UnixMilli()
+}
 
 func TestNewOrderBook(t *testing.T) {
 	ob := NewOrderBook(123, "token-1")
@@ -35,7 +40,7 @@ func TestOrderBookApplySnapshot(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)},
 	}
 
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	if ob.Sequence() != 1 {
 		t.Errorf("Sequence() = %d, want 1", ob.Sequence())
@@ -63,7 +68,7 @@ func TestOrderBookApplySnapshotFiltersZeroSize(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)},
 	}
 
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	if ob.BidCount() != 1 {
 		t.Errorf("BidCount() = %d, want 1 (zero size filtered)", ob.BidCount())
@@ -83,7 +88,7 @@ func TestOrderBookApplyDiff(t *testing.T) {
 	asks := []PriceLevel{
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(50)},
 	}
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	// Apply diff - add new level, update existing
 	bidDiffs := []PriceLevelDiff{
@@ -94,7 +99,7 @@ func TestOrderBookApplyDiff(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.Zero}, // Remove
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)}, // Add
 	}
-	ob.ApplyDiff(bidDiffs, askDiffs, 2)
+	ob.ApplyDiff(bidDiffs, askDiffs, 2, nowMs())
 
 	if ob.Sequence() != 2 {
 		t.Errorf("Sequence() = %d, want 2", ob.Sequence())
@@ -113,13 +118,13 @@ func TestOrderBookApplyDiffIgnoresOldSequence(t *testing.T) {
 	bids := []PriceLevel{
 		{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(100)},
 	}
-	ob.ApplySnapshot(bids, nil, 5)
+	ob.ApplySnapshot(bids, nil, 5, nowMs())
 
 	// Try to apply diff with older sequence
 	bidDiffs := []PriceLevelDiff{
 		{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(999)},
 	}
-	ob.ApplyDiff(bidDiffs, nil, 3) // Old sequence, should be ignored
+	ob.ApplyDiff(bidDiffs, nil, 3, nowMs()) // Old sequence, should be ignored
 
 	// Check size wasn't updated
 	allBids := ob.GetAllBids()
@@ -152,7 +157,7 @@ func TestOrderBookGetBBO(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(50)},
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)},
 	}
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	bbo = ob.GetBBO()
 	if bbo.BestBid == nil {
@@ -182,7 +187,7 @@ func TestOrderBookGetDepth(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)},
 		{Price: decimal.NewFromFloat(0.57), Size: decimal.NewFromInt(100)},
 	}
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	// Get top 2 levels
 	depth := ob.GetDepth(2)
@@ -218,7 +223,7 @@ func TestOrderBookGetAllBids(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(100)},
 		{Price: decimal.NewFromFloat(0.49), Size: decimal.NewFromInt(200)},
 	}
-	ob.ApplySnapshot(bids, nil, 1)
+	ob.ApplySnapshot(bids, nil, 1, nowMs())
 
 	allBids := ob.GetAllBids()
 	if len(allBids) != 3 {
@@ -242,7 +247,7 @@ func TestOrderBookGetAllAsks(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(50)},
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)},
 	}
-	ob.ApplySnapshot(nil, asks, 1)
+	ob.ApplySnapshot(nil, asks, 1, nowMs())
 
 	allAsks := ob.GetAllAsks()
 	if len(allAsks) != 3 {
@@ -266,7 +271,7 @@ func TestOrderBookScanBidsAbove(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.49), Size: decimal.NewFromInt(200)},
 		{Price: decimal.NewFromFloat(0.48), Size: decimal.NewFromInt(300)},
 	}
-	ob.ApplySnapshot(bids, nil, 1)
+	ob.ApplySnapshot(bids, nil, 1, nowMs())
 
 	// Scan bids at or above 0.49
 	result := ob.ScanBidsAbove(decimal.NewFromFloat(0.49))
@@ -283,7 +288,7 @@ func TestOrderBookScanAsksBelow(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)},
 		{Price: decimal.NewFromFloat(0.57), Size: decimal.NewFromInt(100)},
 	}
-	ob.ApplySnapshot(nil, asks, 1)
+	ob.ApplySnapshot(nil, asks, 1, nowMs())
 
 	// Scan asks at or below 0.56
 	result := ob.ScanAsksBelow(decimal.NewFromFloat(0.56))
@@ -308,7 +313,7 @@ func TestOrderBookGetMidPrice(t *testing.T) {
 	asks := []PriceLevel{
 		{Price: decimal.NewFromFloat(0.60), Size: decimal.NewFromInt(50)},
 	}
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	midPrice = ob.GetMidPrice()
 	expected := decimal.NewFromFloat(0.55) // (0.50 + 0.60) / 2
@@ -333,7 +338,7 @@ func TestOrderBookGetSpread(t *testing.T) {
 	asks := []PriceLevel{
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(50)},
 	}
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	spread = ob.GetSpread()
 	expected := decimal.NewFromFloat(0.05) // 0.55 - 0.50
@@ -358,7 +363,7 @@ func TestOrderBookGetSpreadBps(t *testing.T) {
 	asks := []PriceLevel{
 		{Price: decimal.NewFromFloat(0.60), Size: decimal.NewFromInt(50)},
 	}
-	ob.ApplySnapshot(bids, asks, 1)
+	ob.ApplySnapshot(bids, asks, 1, nowMs())
 
 	spreadBps = ob.GetSpreadBps()
 	// Spread = 0.10, MidPrice = 0.55, SpreadBps = 0.10 / 0.55 * 10000 ≈ 1818
@@ -374,7 +379,7 @@ func TestOrderBookTotalBidSize(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(100)},
 		{Price: decimal.NewFromFloat(0.49), Size: decimal.NewFromInt(200)},
 	}
-	ob.ApplySnapshot(bids, nil, 1)
+	ob.ApplySnapshot(bids, nil, 1, nowMs())
 
 	total := ob.TotalBidSize()
 	expected := decimal.NewFromInt(300)
@@ -390,7 +395,7 @@ func TestOrderBookTotalAskSize(t *testing.T) {
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(50)},
 		{Price: decimal.NewFromFloat(0.56), Size: decimal.NewFromInt(75)},
 	}
-	ob.ApplySnapshot(nil, asks, 1)
+	ob.ApplySnapshot(nil, asks, 1, nowMs())
 
 	total := ob.TotalAskSize()
 	expected := decimal.NewFromInt(125)
@@ -408,7 +413,7 @@ func TestOrderBookClear(t *testing.T) {
 	asks := []PriceLevel{
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(50)},
 	}
-	ob.ApplySnapshot(bids, asks, 5)
+	ob.ApplySnapshot(bids, asks, 5, nowMs())
 
 	ob.Clear()
 
@@ -429,7 +434,7 @@ func TestOrderBookClone(t *testing.T) {
 	asks := []PriceLevel{
 		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(50)},
 	}
-	ob.ApplySnapshot(bids, asks, 5)
+	ob.ApplySnapshot(bids, asks, 5, nowMs())
 
 	clone := ob.Clone()
 
@@ -468,7 +473,7 @@ func TestOrderBookConcurrentAccess(t *testing.T) {
 			bids := []PriceLevel{
 				{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(int64(i))},
 			}
-			ob.ApplySnapshot(bids, nil, int64(i))
+			ob.ApplySnapshot(bids, nil, int64(i), nowMs())
 		}
 		done <- true
 	}()

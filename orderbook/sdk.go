@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/binary-jerry/opinion-sdk/common"
 	"github.com/shopspring/decimal"
 )
 
@@ -23,11 +24,13 @@ type SDK struct {
 	wsClient        *WSClient
 	manager         *Manager
 	snapshotFetcher SnapshotFetcher
+	rateLimiter     *common.RateLimiter
 
-	mu          sync.RWMutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	started     bool
+	mu               sync.RWMutex
+	ctx              context.Context
+	cancel           context.CancelFunc
+	started          bool
+	validationCancel context.CancelFunc // For stopping periodic validation
 }
 
 // NewSDK creates a new orderbook SDK instance
@@ -39,10 +42,14 @@ func NewSDK(config *Config) *SDK {
 	wsClient := NewWSClient(config)
 	manager := NewManager(wsClient)
 
+	// Create rate limiter: 10 requests/second, burst of 5
+	rateLimiter := common.NewRateLimiter(10, 5)
+
 	return &SDK{
-		config:   config,
-		wsClient: wsClient,
-		manager:  manager,
+		config:      config,
+		wsClient:    wsClient,
+		manager:     manager,
+		rateLimiter: rateLimiter,
 	}
 }
 
@@ -77,11 +84,89 @@ func (s *SDK) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start manager: %w", err)
 	}
 
+	// Start reconnect handler to refresh snapshots on reconnection
+	go s.handleReconnectEvents()
+
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
 
 	return nil
+}
+
+// handleReconnectEvents listens for reconnect events and refreshes snapshots
+func (s *SDK) handleReconnectEvents() {
+	events := s.wsClient.Events()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			if event.Type == EventReconnected {
+				s.refreshAllSnapshots()
+			}
+		}
+	}
+}
+
+// refreshAllSnapshots refreshes snapshots for all registered market token pairs
+func (s *SDK) refreshAllSnapshots() {
+	s.mu.RLock()
+	fetcher := s.snapshotFetcher
+	s.mu.RUnlock()
+
+	if fetcher == nil {
+		log.Printf("[OrderbookSDK] Cannot refresh snapshots: no snapshot fetcher set")
+		return
+	}
+
+	pairs := s.manager.GetAllMarketTokenPairs()
+	if len(pairs) == 0 {
+		return
+	}
+
+	log.Printf("[OrderbookSDK] Refreshing snapshots for %d markets after reconnection", len(pairs))
+
+	for _, pair := range pairs {
+		// Mark both tokens as uninitialized
+		s.manager.MarkUninitialized(pair.YesTokenID)
+		s.manager.MarkUninitialized(pair.NoTokenID)
+
+		// Refresh snapshots asynchronously
+		go func(p *MarketTokenPair) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// Fetch YES snapshot with rate limiting
+			if err := s.rateLimiter.Wait(ctx); err != nil {
+				log.Printf("[OrderbookSDK] Rate limit wait failed for YES token %s: %v", p.YesTokenID, err)
+				return
+			}
+			yesBids, yesAsks, err := fetcher.GetOrderbookSnapshot(ctx, p.YesTokenID)
+			if err != nil {
+				log.Printf("[OrderbookSDK] Failed to refresh YES snapshot for %s: %v", p.YesTokenID, err)
+			} else {
+				s.manager.ApplySnapshot(p.MarketID, p.YesTokenID, yesBids, yesAsks, time.Now().UnixMilli())
+				log.Printf("[OrderbookSDK] Refreshed YES snapshot for %s", p.YesTokenID)
+			}
+
+			// Fetch NO snapshot with rate limiting
+			if err := s.rateLimiter.Wait(ctx); err != nil {
+				log.Printf("[OrderbookSDK] Rate limit wait failed for NO token %s: %v", p.NoTokenID, err)
+				return
+			}
+			noBids, noAsks, err := fetcher.GetOrderbookSnapshot(ctx, p.NoTokenID)
+			if err != nil {
+				log.Printf("[OrderbookSDK] Failed to refresh NO snapshot for %s: %v", p.NoTokenID, err)
+			} else {
+				s.manager.ApplySnapshot(p.MarketID, p.NoTokenID, noBids, noAsks, time.Now().UnixMilli())
+				log.Printf("[OrderbookSDK] Refreshed NO snapshot for %s", p.NoTokenID)
+			}
+		}(pair)
+	}
 }
 
 // Stop disconnects and stops processing events
@@ -92,6 +177,12 @@ func (s *SDK) Stop() error {
 		return nil
 	}
 	s.started = false
+
+	// Stop periodic validation if running
+	if s.validationCancel != nil {
+		s.validationCancel()
+		s.validationCancel = nil
+	}
 	s.mu.Unlock()
 
 	if s.cancel != nil {
@@ -141,6 +232,7 @@ func (s *SDK) SubscribeWithSnapshot(ctx context.Context, marketID int64, tokenID
 
 // SubscribeMarketWithSnapshot 订阅整个市场（YES 和 NO 两个 token）并自动获取快照
 // 这是最方便的订阅方式，适用于二元市场
+// 会自动注册 token pair 用于镜像同步
 func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, yesTokenID, noTokenID string) error {
 	s.mu.RLock()
 	fetcher := s.snapshotFetcher
@@ -150,12 +242,19 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 		return fmt.Errorf("snapshot fetcher not set, call SetSnapshotFetcher first")
 	}
 
-	// 1. 订阅 WebSocket
+	// 1. 注册 token pair 用于镜像同步
+	s.manager.RegisterMarketTokenPair(&MarketTokenPair{
+		MarketID:   marketID,
+		YesTokenID: yesTokenID,
+		NoTokenID:  noTokenID,
+	})
+
+	// 2. 订阅 WebSocket
 	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
 		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
 	}
 
-	// 2. 并行获取两个 token 的快照
+	// 3. 并行获取两个 token 的快照（带限流）
 	var wg sync.WaitGroup
 	var yesErr, noErr error
 	var yesBids, yesAsks, noBids, noAsks []PriceLevel
@@ -164,17 +263,27 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 
 	go func() {
 		defer wg.Done()
+		// 限流
+		if err := s.rateLimiter.Wait(ctx); err != nil {
+			yesErr = err
+			return
+		}
 		yesBids, yesAsks, yesErr = fetcher.GetOrderbookSnapshot(ctx, yesTokenID)
 	}()
 
 	go func() {
 		defer wg.Done()
+		// 限流
+		if err := s.rateLimiter.Wait(ctx); err != nil {
+			noErr = err
+			return
+		}
 		noBids, noAsks, noErr = fetcher.GetOrderbookSnapshot(ctx, noTokenID)
 	}()
 
 	wg.Wait()
 
-	// 3. 应用快照
+	// 4. 应用快照
 	timestamp := time.Now().UnixMilli()
 
 	if yesErr != nil {
@@ -344,8 +453,8 @@ func (s *SDK) ClearOrderBook(tokenID string) {
 }
 
 // ApplySnapshot applies a full orderbook snapshot
-func (s *SDK) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLevel, sequence int64) {
-	s.manager.ApplySnapshot(marketID, tokenID, bids, asks, sequence)
+func (s *SDK) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLevel, timestamp int64) {
+	s.manager.ApplySnapshot(marketID, tokenID, bids, asks, timestamp)
 }
 
 // IsOrderBookInitialized returns whether the orderbook for a token has received a snapshot
@@ -407,4 +516,179 @@ func (s *SDK) String() string {
 
 	return fmt.Sprintf("SDK{started=%v, state=%s, orderbooks=%d}",
 		s.started, s.wsClient.State(), s.manager.GetOrderBookCount())
+}
+
+// GetHealthStatus returns detailed health status for all orderbooks
+func (s *SDK) GetHealthStatus() *HealthStatus {
+	return s.manager.GetHealthStatus()
+}
+
+// StartPeriodicValidation starts periodic orderbook validation
+// interval: how often to validate (recommended: 30-60 seconds)
+// This fetches fresh snapshots from the API and corrects any drift
+func (s *SDK) StartPeriodicValidation(interval time.Duration) {
+	s.mu.Lock()
+	if s.validationCancel != nil {
+		s.mu.Unlock()
+		return // Already running
+	}
+
+	ctx, cancel := context.WithCancel(s.ctx)
+	s.validationCancel = cancel
+	s.mu.Unlock()
+
+	go s.runPeriodicValidation(ctx, interval)
+	log.Printf("[OrderbookSDK] Started periodic validation with interval %v", interval)
+}
+
+// StopPeriodicValidation stops the periodic validation
+func (s *SDK) StopPeriodicValidation() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.validationCancel != nil {
+		s.validationCancel()
+		s.validationCancel = nil
+		log.Printf("[OrderbookSDK] Stopped periodic validation")
+	}
+}
+
+// runPeriodicValidation runs the validation loop
+func (s *SDK) runPeriodicValidation(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.validateAllOrderBooks()
+		}
+	}
+}
+
+// validateAllOrderBooks validates and corrects all registered orderbooks
+func (s *SDK) validateAllOrderBooks() {
+	s.mu.RLock()
+	fetcher := s.snapshotFetcher
+	s.mu.RUnlock()
+
+	if fetcher == nil {
+		return
+	}
+
+	pairs := s.manager.GetAllMarketTokenPairs()
+	if len(pairs) == 0 {
+		return
+	}
+
+	for _, pair := range pairs {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+		// Validate YES token
+		if result := s.ValidateOrderBook(ctx, pair.MarketID, pair.YesTokenID); result.Error != nil {
+			log.Printf("[OrderbookSDK] Validation error for YES %s: %v", pair.YesTokenID, result.Error)
+		} else if !result.Valid {
+			log.Printf("[OrderbookSDK] Corrected YES orderbook %s: bids diff=%d, asks diff=%d",
+				pair.YesTokenID, result.BidDifference, result.AskDifference)
+		}
+
+		// Validate NO token
+		if result := s.ValidateOrderBook(ctx, pair.MarketID, pair.NoTokenID); result.Error != nil {
+			log.Printf("[OrderbookSDK] Validation error for NO %s: %v", pair.NoTokenID, result.Error)
+		} else if !result.Valid {
+			log.Printf("[OrderbookSDK] Corrected NO orderbook %s: bids diff=%d, asks diff=%d",
+				pair.NoTokenID, result.BidDifference, result.AskDifference)
+		}
+
+		cancel()
+	}
+}
+
+// ValidateOrderBook validates a single orderbook against the API snapshot
+// If differences are found, the local orderbook is corrected
+func (s *SDK) ValidateOrderBook(ctx context.Context, marketID int64, tokenID string) *ValidationResult {
+	result := &ValidationResult{TokenID: tokenID}
+
+	s.mu.RLock()
+	fetcher := s.snapshotFetcher
+	s.mu.RUnlock()
+
+	if fetcher == nil {
+		result.Error = fmt.Errorf("snapshot fetcher not set")
+		return result
+	}
+
+	// Rate limit the API call
+	if err := s.rateLimiter.Wait(ctx); err != nil {
+		result.Error = fmt.Errorf("rate limit: %w", err)
+		return result
+	}
+
+	// Fetch fresh snapshot from API
+	apiBids, apiAsks, err := fetcher.GetOrderbookSnapshot(ctx, tokenID)
+	if err != nil {
+		result.Error = fmt.Errorf("fetch snapshot: %w", err)
+		return result
+	}
+
+	// Get local orderbook state
+	ob := s.manager.GetOrderBook(tokenID)
+	if ob == nil || !ob.IsInitialized() {
+		// Not initialized, apply snapshot
+		s.manager.ApplySnapshot(marketID, tokenID, apiBids, apiAsks, time.Now().UnixMilli())
+		result.Corrected = true
+		return result
+	}
+
+	// Compare local with API
+	localBids := ob.GetAllBids()
+	localAsks := ob.GetAllAsks()
+
+	result.BidDifference = s.countDifferences(localBids, apiBids)
+	result.AskDifference = s.countDifferences(localAsks, apiAsks)
+
+	// If differences found, apply the fresh snapshot
+	if result.BidDifference > 0 || result.AskDifference > 0 {
+		s.manager.ApplySnapshot(marketID, tokenID, apiBids, apiAsks, time.Now().UnixMilli())
+		result.Corrected = true
+	} else {
+		result.Valid = true
+	}
+
+	return result
+}
+
+// countDifferences counts the number of price level differences
+func (s *SDK) countDifferences(local []OrderSummary, api []PriceLevel) int {
+	differences := 0
+
+	// Create map from local orders
+	localMap := make(map[string]decimal.Decimal)
+	for _, order := range local {
+		localMap[order.Price.String()] = order.Size
+	}
+
+	// Create map from API orders
+	apiMap := make(map[string]decimal.Decimal)
+	for _, level := range api {
+		apiMap[level.Price.String()] = level.Size
+	}
+
+	// Count differences
+	for price, localSize := range localMap {
+		if apiSize, exists := apiMap[price]; !exists || !apiSize.Equal(localSize) {
+			differences++
+		}
+	}
+
+	// Check for levels in API that aren't in local
+	for price := range apiMap {
+		if _, exists := localMap[price]; !exists {
+			differences++
+		}
+	}
+
+	return differences
 }

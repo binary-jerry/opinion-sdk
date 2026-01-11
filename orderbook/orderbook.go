@@ -105,8 +105,8 @@ func (ob *OrderBook) ApplyDiff(bids, asks []PriceLevelDiff, sequence int64, time
 		return false
 	}
 
-	// Only apply if sequence is newer
-	if sequence <= ob.sequence {
+	// Only apply if sequence is newer (skip check if sequence is 0, meaning no sequence support)
+	if sequence > 0 && sequence <= ob.sequence {
 		return false
 	}
 

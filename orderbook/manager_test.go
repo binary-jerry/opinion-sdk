@@ -471,6 +471,9 @@ func TestManagerHandleDepthUpdate(t *testing.T) {
 	wsClient := NewWSClient(nil)
 	manager := NewManager(wsClient)
 
+	// First initialize the orderbook (required for depth updates to be applied)
+	manager.ApplySnapshot(123, "token-1", nil, nil, time.Now().UnixMilli())
+
 	// Simulate depth update event
 	diffMsg := &DepthDiffMessage{
 		Channel:  ChannelDepthDiff,
@@ -546,5 +549,428 @@ func TestMarketSummary(t *testing.T) {
 	}
 	if summary.BidCount != 5 {
 		t.Errorf("BidCount = %d, want 5", summary.BidCount)
+	}
+}
+
+// ===== New tests for mirror sync and token pair features =====
+
+const (
+	TestMarketID   = int64(3892)
+	TestYesTokenID = "80625377815318636821010811703646073832053347721900305398950501252099028045180"
+	TestNoTokenID  = "52086497305048575202366950269787213150477134543220443931147225499380707602347"
+)
+
+func TestRegisterMarketTokenPair(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	pair := &MarketTokenPair{
+		MarketID:   TestMarketID,
+		YesTokenID: TestYesTokenID,
+		NoTokenID:  TestNoTokenID,
+	}
+
+	manager.RegisterMarketTokenPair(pair)
+
+	// Verify pair is registered
+	gotPair := manager.GetMarketTokenPair(TestMarketID)
+	if gotPair == nil {
+		t.Fatal("expected pair to be registered")
+	}
+	if gotPair.YesTokenID != TestYesTokenID {
+		t.Errorf("expected YesTokenID %s, got %s", TestYesTokenID, gotPair.YesTokenID)
+	}
+	if gotPair.NoTokenID != TestNoTokenID {
+		t.Errorf("expected NoTokenID %s, got %s", TestNoTokenID, gotPair.NoTokenID)
+	}
+}
+
+func TestGetMirrorTokenID(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	pair := &MarketTokenPair{
+		MarketID:   TestMarketID,
+		YesTokenID: TestYesTokenID,
+		NoTokenID:  TestNoTokenID,
+	}
+	manager.RegisterMarketTokenPair(pair)
+
+	// YES token should return NO token as mirror
+	mirrorID := manager.GetMirrorTokenID(TestYesTokenID)
+	if mirrorID != TestNoTokenID {
+		t.Errorf("expected mirror of YES to be NO token, got %s", mirrorID)
+	}
+
+	// NO token should return YES token as mirror
+	mirrorID = manager.GetMirrorTokenID(TestNoTokenID)
+	if mirrorID != TestYesTokenID {
+		t.Errorf("expected mirror of NO to be YES token, got %s", mirrorID)
+	}
+
+	// Unknown token should return empty
+	mirrorID = manager.GetMirrorTokenID("unknown-token")
+	if mirrorID != "" {
+		t.Errorf("expected empty mirror for unknown token, got %s", mirrorID)
+	}
+}
+
+func TestMirrorPriceCalculation(t *testing.T) {
+	tests := []struct {
+		yesPrice        string
+		expectedNoPrice string
+	}{
+		{"0.50", "0.50"},
+		{"0.75", "0.25"},
+		{"0.10", "0.90"},
+		{"0.99", "0.01"},
+		{"0.01", "0.99"},
+		{"1.00", "0.00"},
+		{"0.00", "1.00"},
+	}
+
+	for _, tc := range tests {
+		yesPrice, _ := decimal.NewFromString(tc.yesPrice)
+		expectedNoPrice, _ := decimal.NewFromString(tc.expectedNoPrice)
+
+		// Mirror price = 1 - original price
+		mirrorPrice := decimal.NewFromInt(1).Sub(yesPrice)
+
+		if !mirrorPrice.Equal(expectedNoPrice) {
+			t.Errorf("mirror of %s = %s, expected %s", tc.yesPrice, mirrorPrice.String(), tc.expectedNoPrice)
+		}
+	}
+}
+
+func TestGetAllMarketTokenPairs(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	// Register multiple pairs
+	pair1 := &MarketTokenPair{
+		MarketID:   3892,
+		YesTokenID: "yes-token-1",
+		NoTokenID:  "no-token-1",
+	}
+	pair2 := &MarketTokenPair{
+		MarketID:   3893,
+		YesTokenID: "yes-token-2",
+		NoTokenID:  "no-token-2",
+	}
+
+	manager.RegisterMarketTokenPair(pair1)
+	manager.RegisterMarketTokenPair(pair2)
+
+	// Get all pairs
+	pairs := manager.GetAllMarketTokenPairs()
+
+	if len(pairs) != 2 {
+		t.Fatalf("expected 2 pairs, got %d", len(pairs))
+	}
+
+	// Verify pairs exist (order may vary)
+	found3892 := false
+	found3893 := false
+	for _, p := range pairs {
+		if p.MarketID == 3892 {
+			found3892 = true
+		}
+		if p.MarketID == 3893 {
+			found3893 = true
+		}
+	}
+
+	if !found3892 || !found3893 {
+		t.Error("not all registered pairs were returned")
+	}
+}
+
+func TestMarkUninitialized(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	// Create and initialize orderbook
+	bids := []PriceLevel{
+		{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(100)},
+	}
+	manager.ApplySnapshot(TestMarketID, TestYesTokenID, bids, nil, time.Now().UnixMilli())
+
+	// Verify initialized
+	ob := manager.GetOrderBook(TestYesTokenID)
+	if !ob.IsInitialized() {
+		t.Error("orderbook should be initialized")
+	}
+
+	// Mark as uninitialized (for reconnect scenario)
+	manager.MarkUninitialized(TestYesTokenID)
+
+	// Verify uninitialized (Clear makes it uninitialized)
+	if ob.IsInitialized() {
+		t.Error("orderbook should be uninitialized after MarkUninitialized")
+	}
+}
+
+func TestPendingDiffsDiscardedAfterSnapshot(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	// Create uninitialized orderbook
+	manager.GetOrCreateOrderBook(TestMarketID, TestYesTokenID)
+
+	// Manually add pending diffs
+	manager.mu.Lock()
+	manager.pendingDiffs[TestYesTokenID] = []*SingleDepthDiffMessage{
+		{
+			MsgType:     ChannelDepthDiff,
+			MarketID:    TestMarketID,
+			TokenID:     TestYesTokenID,
+			OutcomeSide: OutcomeSideYES,
+			Side:        "bids",
+			Price:       "0.50",
+			Size:        "100",
+		},
+	}
+	manager.mu.Unlock()
+
+	// Verify pending diffs exist
+	if manager.GetPendingDiffCount(TestYesTokenID) != 1 {
+		t.Fatal("expected 1 pending diff")
+	}
+
+	// Apply snapshot
+	bids := []PriceLevel{
+		{Price: decimal.NewFromFloat(0.48), Size: decimal.NewFromInt(200)},
+	}
+	manager.ApplySnapshot(TestMarketID, TestYesTokenID, bids, nil, time.Now().UnixMilli())
+
+	// Verify pending diffs are discarded
+	if manager.GetPendingDiffCount(TestYesTokenID) != 0 {
+		t.Error("pending diffs should be discarded after snapshot")
+	}
+}
+
+func TestBufferPendingDiffsBeforeInit(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	// Register token pair
+	pair := &MarketTokenPair{
+		MarketID:   TestMarketID,
+		YesTokenID: TestYesTokenID,
+		NoTokenID:  TestNoTokenID,
+	}
+	manager.RegisterMarketTokenPair(pair)
+
+	// Create uninitialized orderbook
+	manager.GetOrCreateOrderBook(TestMarketID, TestYesTokenID)
+
+	// Simulate receiving depth diff before initialization via handleSingleDepthDiff
+	msg := &SingleDepthDiffMessage{
+		MsgType:     ChannelDepthDiff,
+		MarketID:    TestMarketID,
+		TokenID:     TestYesTokenID,
+		OutcomeSide: OutcomeSideYES,
+		Side:        "bids",
+		Price:       "0.50",
+		Size:        "100",
+	}
+
+	// Simulate event handling
+	event := &Event{
+		Type:     EventDepthUpdate,
+		MarketID: TestMarketID,
+		TokenID:  TestYesTokenID,
+		Data:     msg,
+	}
+	manager.handleEvent(event)
+
+	// Verify diff is buffered
+	if manager.GetPendingDiffCount(TestYesTokenID) != 1 {
+		t.Errorf("expected 1 pending diff, got %d", manager.GetPendingDiffCount(TestYesTokenID))
+	}
+}
+
+func TestSingleDepthDiffParsing(t *testing.T) {
+	// Test parsing of actual WebSocket message format
+	msg := &SingleDepthDiffMessage{
+		MsgType:     "market.depth.diff",
+		MarketID:    3892,
+		TokenID:     TestYesTokenID,
+		OutcomeSide: 1,
+		Side:        "bids",
+		Price:       "0.485",
+		Size:        "1000.5",
+	}
+
+	// Verify field parsing
+	if msg.MsgType != ChannelDepthDiff {
+		t.Errorf("expected msgType %s, got %s", ChannelDepthDiff, msg.MsgType)
+	}
+	if msg.OutcomeSide != OutcomeSideYES {
+		t.Errorf("expected outcomeSide %d, got %d", OutcomeSideYES, msg.OutcomeSide)
+	}
+
+	// Parse price and size
+	price, err := decimal.NewFromString(msg.Price)
+	if err != nil {
+		t.Fatalf("failed to parse price: %v", err)
+	}
+	if !price.Equal(decimal.NewFromFloat(0.485)) {
+		t.Errorf("expected price 0.485, got %s", price.String())
+	}
+
+	size, err := decimal.NewFromString(msg.Size)
+	if err != nil {
+		t.Fatalf("failed to parse size: %v", err)
+	}
+	if !size.Equal(decimal.NewFromFloat(1000.5)) {
+		t.Errorf("expected size 1000.5, got %s", size.String())
+	}
+}
+
+func TestDirectOrderBookApplyDiff(t *testing.T) {
+	// Test that ApplyDiff works correctly on OrderBook directly
+	ob := NewOrderBook(123, "token")
+	ob.ApplySnapshot(nil, nil, 0, time.Now().UnixMilli())
+
+	if !ob.IsInitialized() {
+		t.Fatal("orderbook should be initialized after ApplySnapshot")
+	}
+
+	// Apply a single ask diff
+	diff := PriceLevelDiff{
+		Price: decimal.NewFromFloat(0.60),
+		Size:  decimal.NewFromInt(500),
+	}
+	ob.ApplyDiff(nil, []PriceLevelDiff{diff}, 0, time.Now().UnixMilli())
+
+	asks := ob.GetAllAsks()
+	if len(asks) != 1 {
+		t.Fatalf("expected 1 ask after ApplyDiff, got %d", len(asks))
+	}
+}
+
+func TestHandleSingleDepthDiffWithMirrorSync(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	// Register token pair
+	pair := &MarketTokenPair{
+		MarketID:   TestMarketID,
+		YesTokenID: TestYesTokenID,
+		NoTokenID:  TestNoTokenID,
+	}
+	manager.RegisterMarketTokenPair(pair)
+
+	// Initialize both orderbooks with empty data
+	manager.ApplySnapshot(TestMarketID, TestYesTokenID, nil, nil, time.Now().UnixMilli())
+	manager.ApplySnapshot(TestMarketID, TestNoTokenID, nil, nil, time.Now().UnixMilli())
+
+	// Verify orderbooks are initialized
+	yesOb := manager.GetOrderBook(TestYesTokenID)
+	if yesOb == nil {
+		t.Fatal("YES orderbook should exist")
+	}
+	if !yesOb.IsInitialized() {
+		t.Fatal("YES orderbook should be initialized")
+	}
+
+	// Simulate YES token ask update at 0.60
+	// Expected mirror: NO bids at 0.40
+	yesAskMsg := &SingleDepthDiffMessage{
+		MsgType:     ChannelDepthDiff,
+		MarketID:    TestMarketID,
+		TokenID:     TestYesTokenID,
+		OutcomeSide: OutcomeSideYES,
+		Side:        "asks",
+		Price:       "0.60",
+		Size:        "500",
+	}
+
+	event := &Event{
+		Type:     EventDepthUpdate,
+		MarketID: TestMarketID,
+		TokenID:  TestYesTokenID,
+		Data:     yesAskMsg,
+	}
+	manager.handleEvent(event)
+
+	// Verify YES orderbook has ask at 0.60
+	yesAsks := yesOb.GetAllAsks()
+	if len(yesAsks) != 1 {
+		t.Fatalf("expected 1 YES ask, got %d", len(yesAsks))
+	}
+	if !yesAsks[0].Price.Equal(decimal.NewFromFloat(0.60)) {
+		t.Errorf("expected YES ask price 0.60, got %s", yesAsks[0].Price.String())
+	}
+
+	// Verify NO orderbook has mirrored bid at 0.40
+	noOb := manager.GetOrderBook(TestNoTokenID)
+	noBids := noOb.GetAllBids()
+	if len(noBids) != 1 {
+		t.Fatalf("expected 1 NO bid (mirrored), got %d", len(noBids))
+	}
+	if !noBids[0].Price.Equal(decimal.NewFromFloat(0.40)) {
+		t.Errorf("expected NO bid price 0.40 (mirrored), got %s", noBids[0].Price.String())
+	}
+	if !noBids[0].Size.Equal(decimal.NewFromInt(500)) {
+		t.Errorf("expected NO bid size 500, got %s", noBids[0].Size.String())
+	}
+}
+
+func TestHandleSingleDepthDiffBidToAskMirror(t *testing.T) {
+	wsClient := NewWSClient(nil)
+	manager := NewManager(wsClient)
+
+	// Register token pair
+	pair := &MarketTokenPair{
+		MarketID:   TestMarketID,
+		YesTokenID: TestYesTokenID,
+		NoTokenID:  TestNoTokenID,
+	}
+	manager.RegisterMarketTokenPair(pair)
+
+	// Initialize both orderbooks
+	manager.ApplySnapshot(TestMarketID, TestYesTokenID, nil, nil, time.Now().UnixMilli())
+	manager.ApplySnapshot(TestMarketID, TestNoTokenID, nil, nil, time.Now().UnixMilli())
+
+	// Simulate YES token bid update at 0.45
+	// Expected mirror: NO asks at 0.55
+	yesBidMsg := &SingleDepthDiffMessage{
+		MsgType:     ChannelDepthDiff,
+		MarketID:    TestMarketID,
+		TokenID:     TestYesTokenID,
+		OutcomeSide: OutcomeSideYES,
+		Side:        "bids",
+		Price:       "0.45",
+		Size:        "300",
+	}
+
+	event := &Event{
+		Type:     EventDepthUpdate,
+		MarketID: TestMarketID,
+		TokenID:  TestYesTokenID,
+		Data:     yesBidMsg,
+	}
+	manager.handleEvent(event)
+
+	// Verify YES orderbook has bid at 0.45
+	yesOb := manager.GetOrderBook(TestYesTokenID)
+	yesBids := yesOb.GetAllBids()
+	if len(yesBids) != 1 {
+		t.Fatalf("expected 1 YES bid, got %d", len(yesBids))
+	}
+	if !yesBids[0].Price.Equal(decimal.NewFromFloat(0.45)) {
+		t.Errorf("expected YES bid price 0.45, got %s", yesBids[0].Price.String())
+	}
+
+	// Verify NO orderbook has mirrored ask at 0.55
+	noOb := manager.GetOrderBook(TestNoTokenID)
+	noAsks := noOb.GetAllAsks()
+	if len(noAsks) != 1 {
+		t.Fatalf("expected 1 NO ask (mirrored), got %d", len(noAsks))
+	}
+	if !noAsks[0].Price.Equal(decimal.NewFromFloat(0.55)) {
+		t.Errorf("expected NO ask price 0.55 (mirrored), got %s", noAsks[0].Price.String())
 	}
 }

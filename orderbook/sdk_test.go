@@ -639,8 +639,9 @@ func TestSDKApplySnapshot(t *testing.T) {
 	if ob.AskCount() != 1 {
 		t.Errorf("AskCount = %d, want 1", ob.AskCount())
 	}
-	if ob.Sequence() != 5 {
-		t.Errorf("Sequence = %d, want 5", ob.Sequence())
+	// Note: sequence is always 0 now since Opinion API doesn't have sequence field
+	if ob.Sequence() != 0 {
+		t.Errorf("Sequence = %d, want 0", ob.Sequence())
 	}
 }
 
@@ -702,4 +703,171 @@ func TestSDKSubscribeTradeRecords(t *testing.T) {
 	if err != nil {
 		t.Errorf("SubscribeTradeRecords() error: %v", err)
 	}
+}
+
+func TestSDKGetHealthStatus(t *testing.T) {
+	sdk := NewSDK(nil)
+
+	// Before start, health status should show not connected
+	status := sdk.GetHealthStatus()
+	if status.Connected {
+		t.Error("Expected not connected before start")
+	}
+	if status.OrderBookCount != 0 {
+		t.Errorf("Expected 0 orderbooks, got %d", status.OrderBookCount)
+	}
+}
+
+func TestSDKHealthStatusWithOrderBooks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		conn, _ := upgrader.Upgrade(w, r, nil)
+		defer conn.Close()
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	config := &Config{WSEndpoint: wsURL, HeartbeatInterval: 300}
+	sdk := NewSDK(config)
+
+	ctx := context.Background()
+	sdk.Start(ctx)
+	defer sdk.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Apply a snapshot to create an orderbook
+	bids := []PriceLevel{{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(100)}}
+	asks := []PriceLevel{{Price: decimal.NewFromFloat(0.60), Size: decimal.NewFromInt(100)}}
+	sdk.ApplySnapshot(123, "test-token", bids, asks, time.Now().UnixMilli())
+
+	status := sdk.GetHealthStatus()
+	if !status.Connected {
+		t.Error("Expected connected after start")
+	}
+	if status.OrderBookCount != 1 {
+		t.Errorf("Expected 1 orderbook, got %d", status.OrderBookCount)
+	}
+	if status.HealthyCount != 1 {
+		t.Errorf("Expected 1 healthy orderbook, got %d", status.HealthyCount)
+	}
+	if len(status.OrderBooks) != 1 {
+		t.Errorf("Expected 1 orderbook in list, got %d", len(status.OrderBooks))
+	}
+	if status.OrderBooks[0].TokenID != "test-token" {
+		t.Errorf("Expected tokenID 'test-token', got '%s'", status.OrderBooks[0].TokenID)
+	}
+	if !status.OrderBooks[0].Initialized {
+		t.Error("Expected orderbook to be initialized")
+	}
+}
+
+func TestSDKValidateOrderBook(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		conn, _ := upgrader.Upgrade(w, r, nil)
+		defer conn.Close()
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	config := &Config{WSEndpoint: wsURL, HeartbeatInterval: 300}
+	sdk := NewSDK(config)
+
+	ctx := context.Background()
+	sdk.Start(ctx)
+	defer sdk.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Test without snapshot fetcher - should error
+	result := sdk.ValidateOrderBook(ctx, 123, "test-token")
+	if result.Error == nil {
+		t.Error("Expected error when no snapshot fetcher set")
+	}
+
+	// Set up a mock snapshot fetcher
+	fetcher := &mockSnapshotFetcher{
+		bids: []PriceLevel{{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(100)}},
+		asks: []PriceLevel{{Price: decimal.NewFromFloat(0.60), Size: decimal.NewFromInt(100)}},
+	}
+	sdk.SetSnapshotFetcher(fetcher)
+
+	// Now validation should work and initialize the orderbook
+	result = sdk.ValidateOrderBook(ctx, 123, "test-token")
+	if result.Error != nil {
+		t.Errorf("Unexpected error: %v", result.Error)
+	}
+	if !result.Corrected {
+		t.Error("Expected orderbook to be corrected (initialized)")
+	}
+
+	// Verify orderbook was initialized
+	if !sdk.IsOrderBookInitialized("test-token") {
+		t.Error("Expected orderbook to be initialized")
+	}
+
+	// Validate again - should be valid now
+	result = sdk.ValidateOrderBook(ctx, 123, "test-token")
+	if result.Error != nil {
+		t.Errorf("Unexpected error: %v", result.Error)
+	}
+	if !result.Valid {
+		t.Error("Expected orderbook to be valid")
+	}
+}
+
+func TestSDKCountDifferences(t *testing.T) {
+	sdk := NewSDK(nil)
+
+	// Test identical data
+	local := []OrderSummary{
+		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(100)},
+		{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(200)},
+	}
+	api := []PriceLevel{
+		{Price: decimal.NewFromFloat(0.55), Size: decimal.NewFromInt(100)},
+		{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(200)},
+	}
+
+	diff := sdk.countDifferences(local, api)
+	if diff != 0 {
+		t.Errorf("Expected 0 differences, got %d", diff)
+	}
+
+	// Test different size
+	api[0].Size = decimal.NewFromInt(150)
+	diff = sdk.countDifferences(local, api)
+	if diff != 1 {
+		t.Errorf("Expected 1 difference, got %d", diff)
+	}
+
+	// Test missing level in local
+	api = append(api, PriceLevel{Price: decimal.NewFromFloat(0.45), Size: decimal.NewFromInt(50)})
+	diff = sdk.countDifferences(local, api)
+	if diff != 2 {
+		t.Errorf("Expected 2 differences, got %d", diff)
+	}
+}
+
+// mockSnapshotFetcher for testing
+type mockSnapshotFetcher struct {
+	bids []PriceLevel
+	asks []PriceLevel
+}
+
+func (m *mockSnapshotFetcher) GetOrderbookSnapshot(ctx context.Context, tokenID string) ([]PriceLevel, []PriceLevel, error) {
+	return m.bids, m.asks, nil
 }

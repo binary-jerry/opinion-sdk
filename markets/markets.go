@@ -73,7 +73,7 @@ func (c *Client) GetOrderbook(ctx context.Context, tokenID string) (*Orderbook, 
 	}
 
 	params := struct {
-		TokenID string `url:"tokenId"`
+		TokenID string `url:"token_id"`
 	}{
 		TokenID: tokenID,
 	}

@@ -375,8 +375,30 @@ func (c *WSClient) handleMessage(data []byte) {
 		return
 	}
 
+	// Check for msgType field (actual WebSocket format uses msgType instead of channel)
+	var msgTypeCheck struct {
+		MsgType string `json:"msgType"`
+	}
+	_ = json.Unmarshal(data, &msgTypeCheck)
+
+	// Handle actual WebSocket format (single price level with msgType)
+	if msgTypeCheck.MsgType == ChannelDepthDiff {
+		var msg SingleDepthDiffMessage
+		if err := json.Unmarshal(data, &msg); err == nil {
+			c.sendEvent(&Event{
+				Type:      EventDepthUpdate,
+				MarketID:  msg.MarketID,
+				TokenID:   msg.TokenID,
+				Data:      &msg,
+				Timestamp: time.Now().UnixMilli(),
+			})
+		}
+		return
+	}
+
 	switch base.Channel {
 	case ChannelDepthDiff:
+		// Legacy format with bids/asks arrays (kept for backward compatibility)
 		var msg DepthDiffMessage
 		if err := json.Unmarshal(data, &msg); err == nil {
 			c.sendEvent(&Event{
@@ -521,6 +543,12 @@ func (c *WSClient) reconnect() {
 
 		// Resubscribe to all channels
 		c.resubscribe()
+
+		// Send reconnected event (after resubscribe) to trigger snapshot refresh
+		c.sendEvent(&Event{
+			Type:      EventReconnected,
+			Timestamp: time.Now().UnixMilli(),
+		})
 		return
 	}
 }
