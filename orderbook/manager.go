@@ -174,21 +174,44 @@ func (m *Manager) handleSingleDepthDiff(msg *SingleDepthDiffMessage) {
 		if len(pending) < 1000 {
 			m.pendingDiffs[currentTokenID] = append(pending, msg)
 		}
-		return
+		// 注意：这里不 return，继续处理镜像 token
+		// 因为镜像 token 可能已经初始化，需要更新
+	} else {
+		// Apply update to current token's orderbook
+		m.applyPriceUpdate(currentTokenID, msg.Side, price, size)
 	}
-
-	// Apply update to current token's orderbook
-	m.applyPriceUpdate(currentTokenID, msg.Side, price, size)
 
 	// Mirror sync: update the other token's orderbook
 	if mirrorTokenID != "" {
+		// 计算镜像数据
+		mirrorPrice := decimal.NewFromInt(1).Sub(price)
+		mirrorSide := m.getMirrorSide(msg.Side)
+
+		// 确保镜像 token 的订单簿存在
 		mirrorOb, exists := m.orderbooks[mirrorTokenID]
-		if exists && mirrorOb.IsInitialized() {
-			// Mirror price: NO = 1 - YES
-			mirrorPrice := decimal.NewFromInt(1).Sub(price)
-			// Mirror side: asks <-> bids
-			mirrorSide := m.getMirrorSide(msg.Side)
+		if !exists {
+			mirrorOb = NewOrderBook(msg.MarketID, mirrorTokenID)
+			m.orderbooks[mirrorTokenID] = mirrorOb
+		}
+
+		if mirrorOb.IsInitialized() {
+			// 镜像订单簿已初始化，直接应用更新
 			m.applyPriceUpdate(mirrorTokenID, mirrorSide, mirrorPrice, size)
+		} else {
+			// 镜像订单簿未初始化，将镜像数据放入 pendingDiffs
+			mirrorMsg := &SingleDepthDiffMessage{
+				MsgType:     msg.MsgType,
+				MarketID:    msg.MarketID,
+				TokenID:     mirrorTokenID,
+				OutcomeSide: msg.OutcomeSide,
+				Side:        mirrorSide,
+				Price:       mirrorPrice.String(),
+				Size:        msg.Size,
+			}
+			pending := m.pendingDiffs[mirrorTokenID]
+			if len(pending) < 1000 {
+				m.pendingDiffs[mirrorTokenID] = append(pending, mirrorMsg)
+			}
 		}
 	}
 }
@@ -406,7 +429,7 @@ func (m *Manager) GetTokenIDs() []string {
 }
 
 // ApplySnapshot applies a full orderbook snapshot for a token
-// Since there's no sequence in the API, we discard all pending diffs after applying snapshot
+// After applying snapshot, pending diffs are applied to ensure no data is lost
 func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLevel, timestamp int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -420,9 +443,41 @@ func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []Pri
 	// Apply snapshot with sequence=0 (not used)
 	ob.ApplySnapshot(bids, asks, 0, timestamp)
 
-	// Discard all pending diffs - since there's no sequence, we can't determine order
-	// The orderbook will converge to correct state with subsequent updates
-	delete(m.pendingDiffs, tokenID)
+	// 应用 pendingDiffs 中缓存的增量更新
+	// 虽然没有 sequence 来精确判断顺序，但这些 diff 都是在订阅后收到的
+	// 应用它们可以确保不丢失快照获取期间的更新
+	pendingMsgs := m.pendingDiffs[tokenID]
+	if len(pendingMsgs) > 0 {
+		for _, msg := range pendingMsgs {
+			price, err := decimal.NewFromString(msg.Price)
+			if err != nil {
+				continue
+			}
+			size, err := decimal.NewFromString(msg.Size)
+			if err != nil {
+				continue
+			}
+			m.applyPriceUpdateInternal(ob, msg.Side, price, size)
+		}
+		// 清空已应用的 pendingDiffs
+		delete(m.pendingDiffs, tokenID)
+	}
+}
+
+// applyPriceUpdateInternal 直接在订单簿上应用价格更新（内部方法，无锁）
+func (m *Manager) applyPriceUpdateInternal(ob *OrderBook, side string, price, size decimal.Decimal) {
+	if ob == nil || !ob.IsInitialized() {
+		return
+	}
+
+	timestamp := time.Now().UnixMilli()
+	diff := PriceLevelDiff{Price: price, Size: size}
+
+	if side == "bids" {
+		ob.ApplyDiff([]PriceLevelDiff{diff}, nil, 0, timestamp)
+	} else {
+		ob.ApplyDiff(nil, []PriceLevelDiff{diff}, 0, timestamp)
+	}
 }
 
 // HealthCheck returns true if the manager is healthy
@@ -625,6 +680,14 @@ func (m *Manager) GetPendingDiffCount(tokenID string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.pendingDiffs[tokenID])
+}
+
+// ClearPendingDiffs clears pending diffs for a token
+// 在获取快照前调用，确保只保留快照获取期间和之后的 diff
+func (m *Manager) ClearPendingDiffs(tokenID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.pendingDiffs, tokenID)
 }
 
 // RegisterMarketTokenPair registers a YES/NO token pair for a market

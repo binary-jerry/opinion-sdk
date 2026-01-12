@@ -135,6 +135,10 @@ func (s *SDK) refreshAllSnapshots() {
 		s.manager.MarkUninitialized(pair.YesTokenID)
 		s.manager.MarkUninitialized(pair.NoTokenID)
 
+		// 清空 pendingDiffs，确保只保留快照获取期间和之后的 diff
+		s.manager.ClearPendingDiffs(pair.YesTokenID)
+		s.manager.ClearPendingDiffs(pair.NoTokenID)
+
 		// Refresh snapshots asynchronously
 		go func(p *MarketTokenPair) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -255,7 +259,12 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
 	}
 
-	// 3. 并行获取两个 token 的快照（带限流）
+	// 3. 清空 pendingDiffs，确保只保留快照获取期间和之后的 diff
+	// 这样可以避免旧数据覆盖新快照的问题
+	s.manager.ClearPendingDiffs(yesTokenID)
+	s.manager.ClearPendingDiffs(noTokenID)
+
+	// 4. 并行获取两个 token 的快照（带限流）
 	var wg sync.WaitGroup
 	var yesErr, noErr error
 	var yesBids, yesAsks, noBids, noAsks []PriceLevel
@@ -284,7 +293,7 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 
 	wg.Wait()
 
-	// 4. 应用快照
+	// 5. 应用快照（会自动应用 pendingDiffs 中的增量更新）
 	timestamp := time.Now().UnixMilli()
 
 	if yesErr != nil {
