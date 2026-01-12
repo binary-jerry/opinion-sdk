@@ -198,37 +198,38 @@ func (s *SDK) Subscribe(marketID int64) error {
 	return s.wsClient.SubscribeDepth(marketID)
 }
 
-// SubscribeWithSnapshot 订阅订单簿更新并自动获取初始快照
-// 这是推荐的订阅方式，确保订单簿能正确初始化
-// tokenID 是需要订阅的 token ID (yesTokenId 或 noTokenId)
-func (s *SDK) SubscribeWithSnapshot(ctx context.Context, marketID int64, tokenID string) error {
-	s.mu.RLock()
-	fetcher := s.snapshotFetcher
-	s.mu.RUnlock()
-
-	if fetcher == nil {
-		return fmt.Errorf("snapshot fetcher not set, call SetSnapshotFetcher first")
-	}
-
-	// 1. 先订阅 WebSocket 增量更新
-	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
-		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
-	}
-
-	// 2. 获取订单簿快照
-	bids, asks, err := fetcher.GetOrderbookSnapshot(ctx, tokenID)
-	if err != nil {
-		log.Printf("[OrderbookSDK] Warning: failed to get snapshot for token %s: %v", tokenID, err)
-		// 不返回错误，让 WebSocket 继续工作，等待后续数据
-		return nil
-	}
-
-	// 3. 应用快照到订单簿
-	s.manager.ApplySnapshot(marketID, tokenID, bids, asks, time.Now().UnixMilli())
-	log.Printf("[OrderbookSDK] Applied snapshot for token %s: %d bids, %d asks", tokenID, len(bids), len(asks))
-
-	return nil
-}
+//
+//// SubscribeWithSnapshot 订阅订单簿更新并自动获取初始快照
+//// 这是推荐的订阅方式，确保订单簿能正确初始化
+//// tokenID 是需要订阅的 token ID (yesTokenId 或 noTokenId)
+//func (s *SDK) SubscribeWithSnapshot(ctx context.Context, marketID int64, tokenID string) error {
+//	s.mu.RLock()
+//	fetcher := s.snapshotFetcher
+//	s.mu.RUnlock()
+//
+//	if fetcher == nil {
+//		return fmt.Errorf("snapshot fetcher not set, call SetSnapshotFetcher first")
+//	}
+//
+//	// 1. 先订阅 WebSocket 增量更新
+//	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
+//		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
+//	}
+//
+//	// 2. 获取订单簿快照
+//	bids, asks, err := fetcher.GetOrderbookSnapshot(ctx, tokenID)
+//	if err != nil {
+//		log.Printf("[OrderbookSDK] Warning: failed to get snapshot for token %s: %v", tokenID, err)
+//		// 不返回错误，让 WebSocket 继续工作，等待后续数据
+//		return nil
+//	}
+//
+//	// 3. 应用快照到订单簿
+//	s.manager.ApplySnapshot(marketID, tokenID, bids, asks, time.Now().UnixMilli())
+//	log.Printf("[OrderbookSDK] Applied snapshot for token %s: %d bids, %d asks", tokenID, len(bids), len(asks))
+//
+//	return nil
+//}
 
 // SubscribeMarketWithSnapshot 订阅整个市场（YES 和 NO 两个 token）并自动获取快照
 // 这是最方便的订阅方式，适用于二元市场

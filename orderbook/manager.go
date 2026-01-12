@@ -141,19 +141,19 @@ func (m *Manager) handleSingleDepthDiff(msg *SingleDepthDiffMessage) {
 	// Get the market token pair for mirror sync
 	pair := m.marketTokenPairs[msg.MarketID]
 
-	// Determine current token and mirror token
-	var currentTokenID, mirrorTokenID string
+	// 修复：优先使用 msg.TokenID 来确定目标 token，而非 OutcomeSide
+	// OutcomeSide 表示订单方向（买YES/买NO），不是目标订单簿
+	currentTokenID := msg.TokenID
+	var mirrorTokenID string
+
 	if pair != nil {
-		if msg.OutcomeSide == OutcomeSideYES {
-			currentTokenID = pair.YesTokenID
+		// 根据 tokenID 匹配 pair 来确定镜像 token
+		if currentTokenID == pair.YesTokenID {
 			mirrorTokenID = pair.NoTokenID
-		} else {
-			currentTokenID = pair.NoTokenID
+		} else if currentTokenID == pair.NoTokenID {
 			mirrorTokenID = pair.YesTokenID
 		}
-	} else {
-		// No pair registered, just use the tokenID from message
-		currentTokenID = msg.TokenID
+		// 如果 tokenID 不匹配 pair 中的任何一个，不进行镜像同步
 	}
 
 	// Validate tokenID to avoid creating invalid orderbooks with empty key
