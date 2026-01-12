@@ -150,10 +150,12 @@ func (c *Client) GetQuoteTokens(ctx context.Context) ([]*QuoteToken, error) {
 	return resp.Result, nil
 }
 
-// GetFeeRates 获取费率
-func (c *Client) GetFeeRates(ctx context.Context) (*FeeRates, error) {
+// GetFeeRates 获取指定 token 的费率
+// 返回 maker_fee 和 taker_fee (taker_fee 即 topic_rate)
+func (c *Client) GetFeeRates(ctx context.Context, tokenID string) (*FeeRates, error) {
 	var resp FeeRatesResponse
-	err := c.httpClient.Get(ctx, "/fee-rates", nil, &resp)
+	params := map[string]string{"tokenId": tokenID}
+	err := c.httpClient.Get(ctx, "/fee-rates", params, &resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get fee rates: %w", err)
 	}
