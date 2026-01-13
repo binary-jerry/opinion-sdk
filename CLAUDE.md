@@ -4,12 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Opinion SDK 是一个 Go 语言编写的完整 Opinion 预测市场 SDK，提供：
-- 市场数据查询（Markets API）
-- 订单簿和价格数据
-- 交易操作（CLOB API）
-- EIP-712 签名
-- WebSocket 实时订单簿订阅
+Opinion SDK 是一个 Go 语言编写的 Opinion 预测市场 SDK，提供市场数据查询、订单簿管理、交易操作、EIP-712 签名和 WebSocket 实时订阅。
 
 ## Build and Run Commands
 
@@ -29,55 +24,29 @@ go test ./orderbook/... -v -run TestOrderBook_ApplyDiff
 # 运行测试（带覆盖率）
 go test ./... -cover
 
-# 格式化代码
+# 格式化和检查
 go fmt ./...
-
-# 检查代码问题
 go vet ./...
 
-# 运行示例（需要API Key）
-go run examples/markets/main.go
-
-# 运行交易示例（需要私钥）
-go run examples/trading/main.go
+# 运行示例
+go run examples/markets/main.go      # 需要 API Key
+go run examples/trading/main.go      # 需要私钥
 ```
 
 **Go 版本要求**: 1.21+
 
 ## Architecture
 
-### Module Structure
+### Core Modules
 
-```
-opinion-sdk/
-├── sdk.go              # 统一 SDK 入口
-├── config.go           # 全局配置和常量
-├── common/             # 公共模块
-│   ├── errors.go       # 统一错误定义
-│   ├── http.go         # HTTP 客户端封装
-│   └── utils.go        # 工具函数
-├── markets/            # Markets API（市场数据）
-│   ├── client.go       # Markets 客户端
-│   ├── markets.go      # 市场查询方法
-│   └── types.go        # 市场数据类型
-├── auth/               # 认证模块
-│   ├── types.go        # 认证类型定义
-│   └── signer.go       # EIP-712 签名器
-├── clob/               # CLOB 交易模块
-│   ├── client.go       # CLOB 客户端
-│   ├── types.go        # 订单/交易类型
-│   ├── signing.go      # 订单签名
-│   ├── orders.go       # 订单操作
-│   ├── account.go      # 账户查询
-│   └── trades.go       # 交易历史
-├── orderbook/          # WebSocket 订单簿模块
-│   ├── types.go        # 消息类型定义
-│   ├── orderbook.go    # 订单簿数据结构
-│   ├── ws_client.go    # WebSocket 客户端
-│   ├── manager.go      # 订单簿管理器
-│   └── sdk.go          # 订单簿 SDK 入口
-└── examples/           # 示例代码
-```
+| 模块 | 说明 |
+|------|------|
+| `sdk.go` / `config.go` | 统一 SDK 入口和配置 |
+| `common/` | 公共模块（HTTP、错误、工具） |
+| `markets/` | Markets API（市场/订单簿/价格查询） |
+| `auth/` | EIP-712 签名器 |
+| `clob/` | 交易模块（订单、账户、签名） |
+| `orderbook/` | WebSocket 订单簿模块 |
 
 ### SDK Initialization
 
@@ -91,105 +60,37 @@ config.APIKey = "your-api-key"
 sdk, err := opinion.NewSDK(config, privateKey)
 ```
 
-### Core Components
+### Orderbook 模块架构
 
-#### 1. 统一入口 (sdk.go)
-- `SDK` 结构体整合所有子模块
-- `Markets` - 市场数据查询
-- `Trading` - 交易操作
+订单簿模块由三层组成：
 
-#### 2. Markets API (markets/)
-- 市场列表查询
-- 单个市场详情
-- 订单簿查询
-- 价格历史
-- 报价代币列表
+1. **WSClient** (`ws_client.go`) - WebSocket 连接管理、自动重连、心跳
+2. **Manager** (`manager.go`) - 多订单簿管理、增量更新处理、镜像同步
+3. **SDK** (`sdk.go`) - 高层 API、快照获取、周期性校验
 
-#### 3. Auth 模块 (auth/)
-- **Signer**: EIP-712 类型数据签名（钱包签名）
-- 订单签名
-
-#### 4. CLOB 模块 (clob/)
-- 订单创建/取消
-- 批量订单操作
-- 余额/持仓查询
-- 交易历史
-- 拆分/合并/赎回操作
-
-#### 5. Orderbook 模块 (orderbook/)
-- WebSocket 实时订阅
-- 订单簿维护和更新
-- BBO（最佳买卖价）查询
-- 深度查询
-- 价格和交易更新
-- 自动重连和心跳
-
-### Orderbook SDK Usage
+**镜像同步机制**：二元市场中 YES 和 NO 订单簿互为镜像。当收到一个 token 的更新时，自动计算镜像数据（`mirrorPrice = 1 - price`，`mirrorSide` 反转）更新另一个 token。
 
 ```go
-import "github.com/binary-jerry/opinion-sdk/orderbook"
-
-// 创建配置
-config := orderbook.DefaultConfig()
-config.APIKey = "your-api-key"
-
-// 创建订单簿 SDK
-sdk := orderbook.NewSDK(config)
-
-// 设置快照获取器（必须在订阅前设置）
+// 推荐的订阅方式：订阅整个市场并自动获取快照
 sdk.SetSnapshotFetcher(snapshotFetcher)
-
-// 连接并启动
-ctx := context.Background()
 sdk.Start(ctx)
-defer sdk.Stop()
-
-// 推荐方式：订阅整个市场（YES + NO）并自动获取快照
 sdk.SubscribeMarketWithSnapshot(ctx, marketID, yesTokenID, noTokenID)
 
-// 或者：仅订阅单个 token
-sdk.SubscribeWithSnapshot(ctx, marketID, tokenID)
-
-// 检查订单簿是否已初始化
+// 获取订单簿数据（始终从内存获取，不要调用 REST API）
 if sdk.IsOrderBookInitialized(tokenID) {
-    // 获取 BBO
-    bbo := sdk.GetBBO(tokenID)
-
-    // 获取完整深度
     depth := sdk.GetDepth(tokenID, 50)
-
-    // 扫描价格范围
-    asks := sdk.ScanAsksBelow(tokenID, maxPrice)
-    bids := sdk.ScanBidsAbove(tokenID, minPrice)
-}
-
-// 监听事件
-for event := range sdk.Events() {
-    switch event.Type {
-    case orderbook.EventDepthUpdate:
-        // 处理深度更新
-    case orderbook.EventPriceUpdate:
-        // 处理价格更新
-    case orderbook.EventReconnected:
-        // 重连后会自动刷新快照
-    }
+    bidsAbove := sdk.ScanBidsAbove(tokenID, minPrice)
+    asksBelow := sdk.ScanAsksBelow(tokenID, maxPrice)
 }
 ```
 
-### Authentication
+### 数据一致性保障
 
-Opinion 使用 API Key 认证：
-- 请求头中添加 `apikey: your-api-key`
-- 需要钱包签名的操作使用 EIP-712
+- **initialized 状态**: 订单簿需要收到快照后才可用
+- **pendingDiffs 缓冲**: 快照到达前的增量更新会被缓冲并在快照后重放
+- **重连处理**: 断开时清空所有订单簿和 pendingDiffs，重连后自动刷新快照
 
-### Key Design Patterns
-
-1. **API Key 认证**: 所有请求都需要在请求头中包含 apikey
-2. **EIP-712 签名**: 订单使用 EIP-712 类型数据签名
-3. **价格范围**: 价格必须在 0.01 - 0.99 之间
-4. **金额精度**: 使用 6 位小数（USDT）
-
-### Network Configuration
+## Network Configuration
 
 | 配置 | 值 |
 |------|------|
@@ -197,35 +98,6 @@ Opinion 使用 API Key 认证：
 | API Host | https://openapi.opinion.trade/openapi |
 | WebSocket | wss://ws.opinion.trade |
 | Rate Limit | 15 requests/second |
-
-### API Endpoints
-
-| API | 端点 |
-|-----|------|
-| Markets | /market, /market/{id} |
-| Orderbook | /token/orderbook |
-| Latest Price | /token/latest-price |
-| Price History | /token/price-history |
-| Quote Tokens | /quoteToken |
-
-## Dependencies
-
-- `github.com/ethereum/go-ethereum`: EIP-712 签名
-- `github.com/shopspring/decimal`: 精确十进制运算
-- `github.com/gorilla/websocket`: WebSocket 连接
-
-## Testing
-
-```bash
-# 运行特定模块测试
-go test ./auth/... -v
-go test ./clob/... -v
-go test ./common/... -v
-go test ./orderbook/... -v
-
-# 运行单个测试
-go test ./orderbook/... -v -run TestManager_ApplySnapshot
-```
 
 ### WebSocket Channels
 
@@ -237,64 +109,22 @@ go test ./orderbook/... -v -run TestManager_ApplySnapshot
 | trade.order.update | 用户订单状态更新 |
 | trade.record.new | 用户交易记录 |
 
-## Order Types
+## Key Constraints
 
-- **Market Order**: 市价单，立即以最佳价格成交
-- **Limit Order**: 限价单，指定价格成交
+1. **价格范围**: 必须在 0.01 - 0.99 之间，最多 4 位小数
+2. **API Key**: 所有请求头中需要 `apikey: your-api-key`
+3. **金额精度**: USDT 使用 6 位小数 (`Decimal6 = 1000000`)
+4. **EIP-712**: 订单签名使用 EIP-712 类型数据签名
+5. **金额类型**: `MakerAmountInQuoteToken`（USDT）或 `MakerAmountInBaseToken`（代币）
 
-## Price Range
+## Dependencies
 
-- 最小价格: 0.01 (1% 概率)
-- 最大价格: 0.99 (99% 概率)
-- 精度: 最多 4 位小数
-
-## Common Pitfalls
-
-1. **价格范围**: 价格必须在 0.01 - 0.99 之间
-2. **API Key**: 所有请求都需要 API Key
-3. **金额类型**: 使用 `MakerAmountInQuoteToken`（USDT）或 `MakerAmountInBaseToken`（代币）
-4. **限流**: API 限制 15 次/秒
+- `github.com/ethereum/go-ethereum`: EIP-712 签名
+- `github.com/shopspring/decimal`: 精确十进制运算
+- `github.com/gorilla/websocket`: WebSocket 连接
 
 ## Smart Contract Operations
 
 - **Split**: 将 USDT 拆分为 YES + NO 代币
 - **Merge**: 将 YES + NO 代币合并为 USDT
 - **Redeem**: 从已结算市场赎回收益
-
-## OrderBook 数据一致性保障
-
-### 初始化机制
-- **initialized 状态**: 订单簿需要收到快照后才标记为已初始化
-- **pendingDiffs 缓冲**: 在快照到达前的增量更新会被缓冲，快照后按序列号重放
-- **序列号检查**: 只接受比当前序列号更新的增量更新
-- **时间戳追踪**: 记录最后更新时间戳
-
-### 重连处理
-- 断开连接时自动清空所有订单簿数据（`clearAllOrderBooks`）
-- 重连后重新订阅并等待新快照
-- pendingDiffs 同时清空，防止混合新旧数据
-
-### 获取订单簿数据
-```go
-// 获取完整深度（从内存）
-depth := sdk.GetDepth(tokenID, 50)
-
-// 获取所有买单/卖单
-allBids := sdk.GetAllBids(tokenID)
-allAsks := sdk.GetAllAsks(tokenID)
-
-// 扫描特定价格范围
-bidsAbove := sdk.ScanBidsAbove(tokenID, minPrice)
-asksBelow := sdk.ScanAsksBelow(tokenID, maxPrice)
-
-// 检查初始化状态
-if sdk.IsOrderBookInitialized(tokenID) {
-    // 订单簿已就绪
-}
-```
-
-### 重要提醒
-- **始终从 SDK 内存获取订单簿**: 使用 `GetDepth`/`GetAllBids`/`GetAllAsks`，不要调用 REST API
-- **检查初始化状态**: 使用前调用 `IsOrderBookInitialized(tokenID)` 确认订单簿已就绪
-- **处理深度而非仅 BBO**: 套利计算应考虑完整深度，使用 `ScanAsksBelow`/`ScanBidsAbove`
-- **ApplySnapshot 设置初始化**: 必须调用 `ApplySnapshot` 后订单簿才会被标记为已初始化

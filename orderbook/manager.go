@@ -3,6 +3,7 @@ package orderbook
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -448,6 +449,8 @@ func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []Pri
 	// 应用它们可以确保不丢失快照获取期间的更新
 	pendingMsgs := m.pendingDiffs[tokenID]
 	if len(pendingMsgs) > 0 {
+		log.Printf("[OrderbookManager] Applying %d pending diffs for token %s", len(pendingMsgs), tokenID)
+		appliedCount := 0
 		for _, msg := range pendingMsgs {
 			price, err := decimal.NewFromString(msg.Price)
 			if err != nil {
@@ -458,7 +461,11 @@ func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []Pri
 				continue
 			}
 			m.applyPriceUpdateInternal(ob, msg.Side, price, size)
+			appliedCount++
+			log.Printf("[OrderbookManager] Applied pending diff: token=%s side=%s price=%s size=%s",
+				tokenID, msg.Side, msg.Price, msg.Size)
 		}
+		log.Printf("[OrderbookManager] Applied %d/%d pending diffs for token %s", appliedCount, len(pendingMsgs), tokenID)
 		// 清空已应用的 pendingDiffs
 		delete(m.pendingDiffs, tokenID)
 	}
