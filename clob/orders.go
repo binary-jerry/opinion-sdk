@@ -6,7 +6,8 @@ import (
 )
 
 // PlaceOrder 下单
-func (c *Client) PlaceOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
+// 返回 PlaceOrderData，包含 OrderID、Filled（成交数量）、Status 等信息
+func (c *Client) PlaceOrder(ctx context.Context, req *CreateOrderRequest) (*PlaceOrderData, error) {
 	if c.orderSigner == nil {
 		return nil, fmt.Errorf("private key not set")
 	}
@@ -23,17 +24,21 @@ func (c *Client) PlaceOrder(ctx context.Context, req *CreateOrderRequest) (*Orde
 		"order":    signedOrder,
 	}
 
-	var resp CreateOrderResponse
+	var resp PlaceOrderResponse
 	err = c.httpClient.Post(ctx, "/order", body, &resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to place order: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if resp.Errno != 0 {
+		return nil, fmt.Errorf("API error (errno=%d): %s", resp.Errno, resp.Errmsg)
 	}
 
-	return resp.Result, nil
+	if resp.Result == nil || resp.Result.OrderData == nil {
+		return nil, fmt.Errorf("invalid response: missing order data")
+	}
+
+	return resp.Result.OrderData, nil
 }
 
 // PlaceOrdersBatch 批量下单
@@ -208,22 +213,26 @@ func (c *Client) CreatePreSignedOrder(req *CreateOrderRequest) (*PreSignedOrder,
 
 // SubmitPreSignedOrder 提交预签名订单
 // 使用之前创建的预签名订单快速提交，节省签名时间
-func (c *Client) SubmitPreSignedOrder(ctx context.Context, preSignedOrder *PreSignedOrder) (*Order, error) {
+func (c *Client) SubmitPreSignedOrder(ctx context.Context, preSignedOrder *PreSignedOrder) (*PlaceOrderData, error) {
 	if preSignedOrder == nil || preSignedOrder.RequestBody == nil {
 		return nil, fmt.Errorf("invalid pre-signed order")
 	}
 
-	var resp CreateOrderResponse
+	var resp PlaceOrderResponse
 	err := c.httpClient.Post(ctx, "/order", preSignedOrder.RequestBody, &resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to submit pre-signed order: %w", err)
 	}
 
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
+	if resp.Errno != 0 {
+		return nil, fmt.Errorf("API error (errno=%d): %s", resp.Errno, resp.Errmsg)
 	}
 
-	return resp.Result, nil
+	if resp.Result == nil || resp.Result.OrderData == nil {
+		return nil, fmt.Errorf("invalid response: missing order data")
+	}
+
+	return resp.Result.OrderData, nil
 }
 
 // CreatePreSignedOrders 批量创建预签名订单（不提交）

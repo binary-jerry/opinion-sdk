@@ -179,8 +179,8 @@ func TestOrderTypes(t *testing.T) {
 func TestOpinionExchangeDomain(t *testing.T) {
 	domain := OpinionExchangeDomain(56, "0x123456")
 
-	if domain.Name != "Opinion Exchange" {
-		t.Errorf("Name = %s, want Opinion Exchange", domain.Name)
+	if domain.Name != "OPINION CTF Exchange" {
+		t.Errorf("Name = %s, want OPINION CTF Exchange", domain.Name)
 	}
 	if domain.Version != "1" {
 		t.Errorf("Version = %s, want 1", domain.Version)

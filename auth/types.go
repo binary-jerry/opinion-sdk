@@ -106,7 +106,7 @@ var (
 // OpinionExchangeDomain 返回 Opinion 交易所域
 func OpinionExchangeDomain(chainID int, exchangeAddress string) TypedDataDomain {
 	return TypedDataDomain{
-		Name:              "Opinion Exchange",
+		Name:              "OPINION CTF Exchange",
 		Version:           "1",
 		ChainId:           big.NewInt(int64(chainID)),
 		VerifyingContract: exchangeAddress,

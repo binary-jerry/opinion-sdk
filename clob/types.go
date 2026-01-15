@@ -96,7 +96,39 @@ type CreateOrderRequest struct {
 	FeeRateBps             int             `json:"feeRateBps,omitempty"`
 }
 
-// CreateOrderResponse 创建订单响应
+// PlaceOrderResponse 下单响应 (匹配官方 API: OpenapiOrderPost200Response)
+type PlaceOrderResponse struct {
+	Errno  int             `json:"errno"`  // 0=success
+	Errmsg string          `json:"errmsg"` // 错误消息
+	Result *PlaceOrderResult `json:"result"`
+}
+
+// PlaceOrderResult 下单结果 (匹配官方 API: V2AddOrderResp)
+type PlaceOrderResult struct {
+	OrderData *PlaceOrderData `json:"orderData"`
+}
+
+// PlaceOrderData 下单数据 (匹配官方 API: V2OrderData)
+type PlaceOrderData struct {
+	OrderID         string `json:"orderId"`
+	Amount          string `json:"amount"`          // BUY=USDC金额, SELL=份额
+	Filled          string `json:"filled"`          // 已成交数量
+	Price           string `json:"price"`
+	TotalPrice      string `json:"totalPrice"`
+	Status          int    `json:"status"`          // 1=pending, 2=finished, 3=canceled, 4=expired, 5=failed
+	Side            int    `json:"side"`            // 1=buy, 2=sell
+	OutcomeSide     int    `json:"outcomeSide"`     // 1=yes, 2=no
+	Outcome         string `json:"outcome"`
+	TradingMethod   int    `json:"tradingMethod"`   // 1=market, 2=limit
+	TopicID         int    `json:"topicId"`
+	TopicTitle      string `json:"topicTitle"`
+	CurrencyAddress string `json:"currencyAddress"`
+	CreatedAt       int64  `json:"createdAt"`
+	Expiration      int64  `json:"expiration"`
+	TransNo         string `json:"transNo"`
+}
+
+// CreateOrderResponse 创建订单响应 (旧结构，保留兼容)
 type CreateOrderResponse struct {
 	APIResponse
 	Result *Order `json:"result"`
