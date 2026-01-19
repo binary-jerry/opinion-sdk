@@ -15,6 +15,7 @@ type Client struct {
 	apiKey          string
 	chainID         int
 	exchangeAddress string
+	makerAddress    string // 智能钱包地址（Gnosis Safe）
 }
 
 // ClientConfig 客户端配置
@@ -24,6 +25,7 @@ type ClientConfig struct {
 	PrivateKey      string
 	ChainID         int
 	ExchangeAddress string
+	MakerAddress    string // 智能钱包地址（Gnosis Safe），为空时使用 EOA 模式
 	Timeout         time.Duration
 	MaxRetries      int
 	RetryDelayMs    int
@@ -58,6 +60,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		apiKey:          config.APIKey,
 		chainID:         config.ChainID,
 		exchangeAddress: config.ExchangeAddress,
+		makerAddress:    config.MakerAddress,
 	}
 
 	// 如果提供了私钥，创建签名器
@@ -67,7 +70,16 @@ func NewClient(config *ClientConfig) (*Client, error) {
 			return nil, err
 		}
 		client.signer = signer
-		client.orderSigner = NewOrderSigner(signer, config.ChainID, config.ExchangeAddress)
+
+		// 根据是否有智能钱包地址选择签名模式
+		if config.MakerAddress != "" {
+			// Gnosis Safe 模式：使用智能钱包地址作为 maker
+			client.orderSigner = NewOrderSignerWithMaker(signer, config.ChainID, config.ExchangeAddress, config.MakerAddress)
+		} else {
+			// EOA 模式：使用签名者地址作为 maker
+			client.orderSigner = NewOrderSigner(signer, config.ChainID, config.ExchangeAddress)
+		}
+
 		httpClient.SetDefaultHeader("address", signer.GetAddress())
 	}
 
@@ -87,9 +99,37 @@ func (c *Client) SetPrivateKey(privateKey string) error {
 		return err
 	}
 	c.signer = signer
-	c.orderSigner = NewOrderSigner(signer, c.chainID, c.exchangeAddress)
+
+	// 根据是否有智能钱包地址选择签名模式
+	if c.makerAddress != "" {
+		c.orderSigner = NewOrderSignerWithMaker(signer, c.chainID, c.exchangeAddress, c.makerAddress)
+	} else {
+		c.orderSigner = NewOrderSigner(signer, c.chainID, c.exchangeAddress)
+	}
+
 	c.httpClient.SetDefaultHeader("address", signer.GetAddress())
 	return nil
+}
+
+// SetMakerAddress 设置智能钱包地址
+func (c *Client) SetMakerAddress(makerAddress string) {
+	c.makerAddress = makerAddress
+	// 如果已有签名器，重新创建 orderSigner
+	if c.signer != nil {
+		if makerAddress != "" {
+			c.orderSigner = NewOrderSignerWithMaker(c.signer, c.chainID, c.exchangeAddress, makerAddress)
+		} else {
+			c.orderSigner = NewOrderSigner(c.signer, c.chainID, c.exchangeAddress)
+		}
+	}
+}
+
+// GetMakerAddress 获取智能钱包地址
+func (c *Client) GetMakerAddress() string {
+	if c.orderSigner != nil {
+		return c.orderSigner.GetMakerAddress()
+	}
+	return c.makerAddress
 }
 
 // GetAddress 获取钱包地址

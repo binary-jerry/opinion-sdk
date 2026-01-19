@@ -28,8 +28,8 @@ const (
 
 // 合约地址 (BNB Chain Mainnet)
 const (
-	// ExchangeAddress Opinion 交易所合约地址
-	ExchangeAddress = "0x0000000000000000000000000000000000000000" // 需要填入实际地址
+	// ExchangeAddress Opinion 交易所合约地址 (BSC 主网)
+	ExchangeAddress = "0x5f45344126d6488025b0b84a3a8189f2487a7246"
 
 	// USDTAddress USDT 合约地址
 	USDTAddress = "0x55d398326f99059fF775485246999027B3197955" // BSC USDT

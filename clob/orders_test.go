@@ -19,11 +19,15 @@ func TestPlaceOrder(t *testing.T) {
 			t.Errorf("Expected /order, got %s", r.URL.Path)
 		}
 
-		resp := CreateOrderResponse{
-			APIResponse: APIResponse{Code: 0, Message: "success"},
-			Result: &Order{
-				ID:     "order-123",
-				Status: OrderStatusPending,
+		// 使用实际的 API 响应结构
+		resp := PlaceOrderResponse{
+			Errno:  0,
+			Errmsg: "success",
+			Result: &PlaceOrderResult{
+				OrderData: &PlaceOrderData{
+					OrderID: "order-123",
+					Status:  1, // pending
+				},
 			},
 		}
 
@@ -52,8 +56,8 @@ func TestPlaceOrder(t *testing.T) {
 		t.Fatalf("PlaceOrder() error: %v", err)
 	}
 
-	if order.ID != "order-123" {
-		t.Errorf("Order ID = %s, want order-123", order.ID)
+	if order.OrderID != "order-123" {
+		t.Errorf("Order ID = %s, want order-123", order.OrderID)
 	}
 }
 

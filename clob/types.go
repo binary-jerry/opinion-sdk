@@ -67,7 +67,7 @@ type Order struct {
 
 // SignedOrder 已签名订单
 type SignedOrder struct {
-	Salt          string `json:"salt"`
+	Salt          int64  `json:"salt"`          // 整数类型，与 Python SDK 一致
 	Maker         string `json:"maker"`
 	Signer        string `json:"signer"`
 	Taker         string `json:"taker"`
@@ -78,22 +78,23 @@ type SignedOrder struct {
 	Nonce         string `json:"nonce"`
 	FeeRateBps    string `json:"feeRateBps"`
 	Side          string `json:"side"`
-	SignatureType string `json:"signatureType"`
+	SignatureType int    `json:"signatureType"` // 数字类型
 	Signature     string `json:"signature"`
 }
 
 // CreateOrderRequest 创建订单请求
 type CreateOrderRequest struct {
-	MarketID               string          `json:"marketId"`
-	TokenID                string          `json:"tokenId"`
-	Side                   OrderSide       `json:"side"`
-	Type                   OrderType       `json:"type"`
-	Price                  decimal.Decimal `json:"price"`
+	MarketID                string          `json:"marketId"`
+	TokenID                 string          `json:"tokenId"`
+	Side                    OrderSide       `json:"side"`
+	Type                    OrderType       `json:"type"`
+	Price                   decimal.Decimal `json:"price"`
 	MakerAmountInQuoteToken decimal.Decimal `json:"makerAmountInQuoteToken,omitempty"` // USDT 金额
 	MakerAmountInBaseToken  decimal.Decimal `json:"makerAmountInBaseToken,omitempty"`  // 代币数量
-	ExpiresAt              int64           `json:"expiresAt,omitempty"`
-	Nonce                  string          `json:"nonce,omitempty"`
-	FeeRateBps             int             `json:"feeRateBps,omitempty"`
+	ExpiresAt               int64           `json:"expiresAt,omitempty"`
+	Nonce                   string          `json:"nonce,omitempty"`
+	FeeRateBps              int             `json:"feeRateBps,omitempty"`
+	CurrencyAddress         string          `json:"currencyAddress,omitempty"` // 报价代币地址 (从市场信息获取)
 }
 
 // PlaceOrderResponse 下单响应 (匹配官方 API: OpenapiOrderPost200Response)

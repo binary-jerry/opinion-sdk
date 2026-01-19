@@ -15,7 +15,15 @@ type SDK struct {
 }
 
 // NewSDK 创建完整 SDK（需要私钥，支持交易）
+// 使用 EOA 模式，maker 和 signer 使用同一地址
 func NewSDK(config *Config, privateKey string) (*SDK, error) {
+	return NewSDKWithMaker(config, privateKey, "")
+}
+
+// NewSDKWithMaker 创建完整 SDK（支持智能钱包）
+// privateKey: EOA 私钥，用于签名
+// makerAddress: 智能钱包地址（Gnosis Safe），为空时使用 EOA 模式
+func NewSDKWithMaker(config *Config, privateKey string, makerAddress string) (*SDK, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
@@ -43,6 +51,7 @@ func NewSDK(config *Config, privateKey string) (*SDK, error) {
 		PrivateKey:      privateKey,
 		ChainID:         config.ChainID,
 		ExchangeAddress: ExchangeAddress,
+		MakerAddress:    makerAddress, // 智能钱包地址
 		Timeout:         config.Timeout,
 		MaxRetries:      config.MaxRetries,
 		RetryDelayMs:    config.RetryDelayMs,

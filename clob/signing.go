@@ -10,23 +10,58 @@ import (
 	"github.com/binary-jerry/opinion-sdk/common"
 )
 
-// Decimal6 USDT 精度
-var Decimal6 = decimal.NewFromInt(1000000)
+// Decimal18 USDT 精度 (BSC 上的 USDT 使用 18 位小数)
+var Decimal18 = decimal.RequireFromString("1000000000000000000")
+
+// SignatureType 签名类型
+const (
+	SignatureTypeEOA        = 0 // EOA 钱包签名
+	SignatureTypeGnosisSafe = 2 // Gnosis Safe 智能钱包签名
+)
 
 // OrderSigner 订单签名器
 type OrderSigner struct {
 	signer          *auth.Signer
 	chainID         int
 	exchangeAddress string
+	makerAddress    string // 智能钱包地址（maker），为空时使用 signer 地址
+	signatureType   int    // 签名类型：0=EOA, 2=Gnosis Safe
 }
 
-// NewOrderSigner 创建订单签名器
+// NewOrderSigner 创建订单签名器（EOA 模式）
 func NewOrderSigner(signer *auth.Signer, chainID int, exchangeAddress string) *OrderSigner {
 	return &OrderSigner{
 		signer:          signer,
 		chainID:         chainID,
 		exchangeAddress: exchangeAddress,
+		makerAddress:    "", // 默认使用 signer 地址
+		signatureType:   SignatureTypeEOA,
 	}
+}
+
+// NewOrderSignerWithMaker 创建订单签名器（Gnosis Safe 模式）
+// makerAddress: 智能钱包地址，作为资产持有者和订单 maker
+// signer: EOA 私钥，用于签名
+func NewOrderSignerWithMaker(signer *auth.Signer, chainID int, exchangeAddress string, makerAddress string) *OrderSigner {
+	signatureType := SignatureTypeEOA
+	if makerAddress != "" {
+		signatureType = SignatureTypeGnosisSafe
+	}
+	return &OrderSigner{
+		signer:          signer,
+		chainID:         chainID,
+		exchangeAddress: exchangeAddress,
+		makerAddress:    makerAddress,
+		signatureType:   signatureType,
+	}
+}
+
+// GetMakerAddress 获取 maker 地址（智能钱包或 EOA）
+func (s *OrderSigner) GetMakerAddress() string {
+	if s.makerAddress != "" {
+		return s.makerAddress
+	}
+	return s.signer.GetAddressChecksum()
 }
 
 // CreateSignedOrder 创建签名订单
@@ -66,11 +101,15 @@ func (s *OrderSigner) CreateSignedOrder(req *CreateOrderRequest) (*SignedOrder, 
 		expiration = req.ExpiresAt
 	}
 
+	// 获取 maker 地址：智能钱包地址（如果设置）或签名者地址
+	makerAddr := s.GetMakerAddress()
+	signerAddr := s.signer.GetAddressChecksum()
+
 	// 构建订单负载
 	payload := &auth.OrderPayload{
-		Salt:          salt.String(),
-		Maker:         s.signer.GetAddressChecksum(),
-		Signer:        s.signer.GetAddressChecksum(),
+		Salt:          strconv.FormatInt(salt, 10), // 签名时使用字符串形式
+		Maker:         makerAddr,                   // 智能钱包地址或 EOA 地址
+		Signer:        signerAddr,                  // 签名者地址（始终是 EOA）
 		Taker:         "0x0000000000000000000000000000000000000000",
 		TokenID:       req.TokenID,
 		MakerAmount:   makerAmount.String(),
@@ -79,7 +118,7 @@ func (s *OrderSigner) CreateSignedOrder(req *CreateOrderRequest) (*SignedOrder, 
 		Nonce:         strconv.FormatInt(nonce, 10),
 		FeeRateBps:    strconv.Itoa(req.FeeRateBps),
 		Side:          int(req.Side),
-		SignatureType: 0, // EOA
+		SignatureType: s.signatureType, // 0=EOA, 2=Gnosis Safe
 	}
 
 	// 签名订单
@@ -89,7 +128,7 @@ func (s *OrderSigner) CreateSignedOrder(req *CreateOrderRequest) (*SignedOrder, 
 	}
 
 	return &SignedOrder{
-		Salt:          payload.Salt,
+		Salt:          salt, // JSON 序列化时使用整数
 		Maker:         payload.Maker,
 		Signer:        payload.Signer,
 		Taker:         payload.Taker,
@@ -100,7 +139,7 @@ func (s *OrderSigner) CreateSignedOrder(req *CreateOrderRequest) (*SignedOrder, 
 		Nonce:         payload.Nonce,
 		FeeRateBps:    payload.FeeRateBps,
 		Side:          sideToString(req.Side),
-		SignatureType: "0",
+		SignatureType: s.signatureType,
 		Signature:     signature,
 	}, nil
 }
@@ -126,12 +165,12 @@ func (s *OrderSigner) calculateAmounts(side OrderSide, price, quoteAmount, baseA
 
 	if side == OrderSideBuy {
 		// BUY: maker 出 USDT, taker 出代币
-		makerAmount = price.Mul(size).Mul(Decimal6).Round(0)
-		takerAmount = size.Mul(Decimal6).Round(0)
+		makerAmount = price.Mul(size).Mul(Decimal18).Round(0)
+		takerAmount = size.Mul(Decimal18).Round(0)
 	} else {
 		// SELL: maker 出代币, taker 出 USDT
-		makerAmount = size.Mul(Decimal6).Round(0)
-		takerAmount = price.Mul(size).Mul(Decimal6).Round(0)
+		makerAmount = size.Mul(Decimal18).Round(0)
+		takerAmount = price.Mul(size).Mul(Decimal18).Round(0)
 	}
 
 	return makerAmount, takerAmount

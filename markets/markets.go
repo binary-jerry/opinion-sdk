@@ -44,7 +44,7 @@ func (c *Client) GetMarket(ctx context.Context, marketID string) (*Market, error
 		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
-	return resp.Result, nil
+	return resp.Result.Data, nil
 }
 
 // GetCategoricalMarket 获取多选市场详情
@@ -63,7 +63,7 @@ func (c *Client) GetCategoricalMarket(ctx context.Context, marketID string) (*Ma
 		return nil, fmt.Errorf("API error: [%d] %s", resp.ErrNo, resp.ErrMsg)
 	}
 
-	return resp.Result, nil
+	return resp.Result.Data, nil
 }
 
 // GetOrderbook 获取订单簿

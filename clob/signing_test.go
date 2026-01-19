@@ -55,8 +55,8 @@ func TestOrderSignerCreateSignedOrder(t *testing.T) {
 	}
 
 	// Verify fields
-	if signedOrder.Salt == "" {
-		t.Error("Salt should not be empty")
+	if signedOrder.Salt == 0 {
+		t.Error("Salt should not be zero")
 	}
 	if signedOrder.Maker == "" {
 		t.Error("Maker should not be empty")

@@ -40,12 +40,12 @@ func TestGenerateRandomSalt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateRandomSalt() error: %v", err)
 	}
-	if salt1 == nil {
-		t.Fatal("GenerateRandomSalt() returned nil")
+	if salt1 == 0 {
+		t.Fatal("GenerateRandomSalt() returned zero")
 	}
 
 	salt2, _ := GenerateRandomSalt()
-	if salt1.Cmp(salt2) == 0 {
+	if salt1 == salt2 {
 		t.Error("GenerateRandomSalt() should return different values")
 	}
 }

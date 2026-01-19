@@ -30,13 +30,27 @@ func TimestampMsStr() string {
 }
 
 // GenerateRandomSalt 生成随机 salt
-func GenerateRandomSalt() (*big.Int, error) {
-	bytes := make([]byte, 32)
+// 与 Python SDK 保持一致: salt = round(now * random())
+// 返回 int64 范围内的数字
+func GenerateRandomSalt() (int64, error) {
+	now := time.Now().Unix()
+
+	// 生成 0-1 之间的随机浮点数
+	bytes := make([]byte, 8)
 	_, err := rand.Read(bytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate random salt: %w", err)
+		return 0, fmt.Errorf("failed to generate random salt: %w", err)
 	}
-	return new(big.Int).SetBytes(bytes), nil
+
+	// 将随机字节转换为 0-1 之间的浮点数
+	randVal := float64(new(big.Int).SetBytes(bytes).Uint64()) / float64(^uint64(0))
+
+	// salt = round(now * random)
+	salt := int64(float64(now) * randVal)
+	if salt == 0 {
+		salt = 1 // 确保 salt 不为 0
+	}
+	return salt, nil
 }
 
 // GenerateRandomNonce 生成随机 nonce

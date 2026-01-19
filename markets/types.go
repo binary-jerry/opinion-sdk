@@ -180,7 +180,9 @@ type MarketListResponse struct {
 // MarketDetailResponse 市场详情响应
 type MarketDetailResponse struct {
 	APIResponse
-	Result *Market `json:"result"`
+	Result struct {
+		Data *Market `json:"data"`
+	} `json:"result"`
 }
 
 // OrderbookResponse 订单簿响应

@@ -3,6 +3,8 @@ package clob
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
 )
 
 // PlaceOrder 下单
@@ -18,10 +20,44 @@ func (c *Client) PlaceOrder(ctx context.Context, req *CreateOrderRequest) (*Plac
 		return nil, fmt.Errorf("failed to create signed order: %w", err)
 	}
 
-	// 构建请求体
+	// 构建请求体 - 使用 V2AddOrderReq 扁平结构（与 Python SDK 一致）
+	marketIDInt, _ := strconv.ParseInt(req.MarketID, 10, 64)
+
+	// side: 0=BUY, 1=SELL（数字字符串）
+	side := "0"
+	if req.Side == OrderSideSell {
+		side = "1"
+	}
+
+	// tradingMethod: 1=市价, 2=限价
+	tradingMethod := 2
+	if req.Type == OrderTypeMarket {
+		tradingMethod = 1
+	}
+
 	body := map[string]interface{}{
-		"marketId": req.MarketID,
-		"order":    signedOrder,
+		"topicId":         marketIDInt,
+		"salt":            strconv.FormatInt(signedOrder.Salt, 10), // 字符串
+		"maker":           signedOrder.Maker,
+		"signer":          signedOrder.Signer,
+		"taker":           signedOrder.Taker,
+		"tokenId":         signedOrder.TokenId,
+		"makerAmount":     signedOrder.MakerAmount,
+		"takerAmount":     signedOrder.TakerAmount,
+		"expiration":      signedOrder.Expiration,
+		"nonce":           signedOrder.Nonce,
+		"feeRateBps":      signedOrder.FeeRateBps,
+		"side":            side,                                     // 数字字符串
+		"signatureType":   strconv.Itoa(signedOrder.SignatureType), // 字符串
+		"signature":       signedOrder.Signature,
+		"sign":            signedOrder.Signature, // 同 signature
+		"contractAddress": "",
+		"currencyAddress": req.CurrencyAddress, // 报价代币地址 (从市场信息获取)
+		"price":           req.Price.String(),                      // 价格字符串
+		"tradingMethod":   tradingMethod,                           // 整数
+		"timestamp":       int(c.timestamp()),                      // 当前时间戳
+		"safeRate":        "0",
+		"orderExpTime":    "0",
 	}
 
 	var resp PlaceOrderResponse
@@ -39,6 +75,11 @@ func (c *Client) PlaceOrder(ctx context.Context, req *CreateOrderRequest) (*Plac
 	}
 
 	return resp.Result.OrderData, nil
+}
+
+// timestamp 获取当前时间戳（秒）
+func (c *Client) timestamp() int64 {
+	return time.Now().Unix()
 }
 
 // PlaceOrdersBatch 批量下单

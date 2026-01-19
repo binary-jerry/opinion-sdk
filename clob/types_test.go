@@ -96,7 +96,7 @@ func TestOrderJSON(t *testing.T) {
 
 func TestSignedOrderJSON(t *testing.T) {
 	signedOrder := &SignedOrder{
-		Salt:          "12345",
+		Salt:          12345,
 		Maker:         "0x123",
 		Signer:        "0x123",
 		Taker:         "0x000",
@@ -107,7 +107,7 @@ func TestSignedOrderJSON(t *testing.T) {
 		Nonce:         "1",
 		FeeRateBps:    "0",
 		Side:          "BUY",
-		SignatureType: "0",
+		SignatureType: 0,
 		Signature:     "0xabc123",
 	}
 
@@ -123,7 +123,7 @@ func TestSignedOrderJSON(t *testing.T) {
 	}
 
 	if decoded.Salt != signedOrder.Salt {
-		t.Errorf("Salt = %s, want %s", decoded.Salt, signedOrder.Salt)
+		t.Errorf("Salt = %d, want %d", decoded.Salt, signedOrder.Salt)
 	}
 	if decoded.Signature != signedOrder.Signature {
 		t.Errorf("Signature = %s, want %s", decoded.Signature, signedOrder.Signature)
