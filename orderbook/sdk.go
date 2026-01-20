@@ -91,6 +91,7 @@ func (s *SDK) Start(ctx context.Context) error {
 
 // refreshAllSnapshots refreshes snapshots for all registered market token pairs
 // Called by Manager on reconnect via callback
+// 注意：orderbooks 已在断开连接时被 clearAllOrderBooks 清空
 func (s *SDK) refreshAllSnapshots() {
 	s.mu.RLock()
 	fetcher := s.snapshotFetcher
@@ -109,14 +110,6 @@ func (s *SDK) refreshAllSnapshots() {
 	log.Printf("[OrderbookSDK] Refreshing snapshots for %d markets after reconnection", len(pairs))
 
 	for _, pair := range pairs {
-		// Mark both tokens as uninitialized
-		s.manager.MarkUninitialized(pair.YesTokenID)
-		s.manager.MarkUninitialized(pair.NoTokenID)
-
-		// Clear pending diffs
-		s.manager.ClearPendingDiffs(pair.YesTokenID)
-		s.manager.ClearPendingDiffs(pair.NoTokenID)
-
 		// Refresh snapshots asynchronously
 		go func(p *MarketTokenPair) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -181,6 +174,9 @@ func (s *SDK) Subscribe(marketID int64) error {
 }
 
 // SubscribeMarketWithSnapshot subscribes to a market with automatic snapshot initialization
+// 流程：订阅 WS -> 获取 snapshot -> 应用 snapshot
+// 在 snapshot 应用前收到的 WS 消息会被忽略（因为 !initialized）
+// 定期校验机制可以修正短暂的数据不一致
 func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, yesTokenID, noTokenID string) error {
 	s.mu.RLock()
 	fetcher := s.snapshotFetcher
@@ -197,16 +193,12 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 		NoTokenID:  noTokenID,
 	})
 
-	// 2. Subscribe to WebSocket
+	// 2. Subscribe to WebSocket (消息会因 !initialized 被忽略)
 	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
 		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
 	}
 
-	// 3. Clear pending diffs
-	s.manager.ClearPendingDiffs(yesTokenID)
-	s.manager.ClearPendingDiffs(noTokenID)
-
-	// 4. Fetch snapshots in parallel with rate limiting
+	// 3. Fetch snapshots in parallel with rate limiting
 	var wg sync.WaitGroup
 	var yesErr, noErr error
 	var yesBids, yesAsks, noBids, noAsks []PriceLevel
@@ -233,7 +225,7 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 
 	wg.Wait()
 
-	// 5. Apply snapshots
+	// 4. Apply snapshots (之后的 WS 消息会被正常处理)
 	timestamp := time.Now().UnixMilli()
 
 	if yesErr != nil {
@@ -410,11 +402,6 @@ func (s *SDK) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLe
 // IsOrderBookInitialized returns whether the orderbook for a token has received a snapshot
 func (s *SDK) IsOrderBookInitialized(tokenID string) bool {
 	return s.manager.IsOrderBookInitialized(tokenID)
-}
-
-// GetPendingDiffCount returns the number of pending diffs for a token
-func (s *SDK) GetPendingDiffCount(tokenID string) int {
-	return s.manager.GetPendingDiffCount(tokenID)
 }
 
 // HealthCheck returns true if the SDK is healthy

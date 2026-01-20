@@ -2,13 +2,11 @@ package orderbook
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/shopspring/decimal"
 )
 
 // SnapshotFetchFunc 是一个获取快照的函数类型
-// 可以直接传入 markets.Client.GetOrderbook 方法
 type SnapshotFetchFunc func(ctx context.Context, tokenID string) (bids, asks []PriceLevel, err error)
 
 // FuncSnapshotFetcher 将函数包装为 SnapshotFetcher
@@ -26,42 +24,46 @@ func (f *FuncSnapshotFetcher) GetOrderbookSnapshot(ctx context.Context, tokenID 
 	return f.fetchFunc(ctx, tokenID)
 }
 
-// OrderbookAPIData 订单簿数据（从 REST API 返回）
+// APIOrderbook REST API 返回的订单簿结构
 // 用于适配 markets.Client.GetOrderbook 的返回值
-type OrderbookAPIData struct {
-	TokenID string
-	Bids    []*OrderbookAPILevel
-	Asks    []*OrderbookAPILevel
+type APIOrderbook struct {
+	Bids []*APIOrderbookLevel
+	Asks []*APIOrderbookLevel
 }
 
-// OrderbookAPILevel 订单簿层级（从 REST API 返回，使用 decimal.Decimal）
-type OrderbookAPILevel struct {
+// APIOrderbookLevel REST API 返回的订单簿层级
+type APIOrderbookLevel struct {
 	Price decimal.Decimal
 	Size  decimal.Decimal
 }
 
-// CreateSnapshotFetcherFromMarketsClient 从 markets.Client 类型的方法创建 SnapshotFetcher
+// NewSnapshotFetcherFromAPI 从 REST API 创建 SnapshotFetcher
 // 使用示例:
 //
 //	marketsClient := markets.NewClient(config)
-//	fetcher := orderbook.CreateSnapshotFetcherFromMarketsClient(func(ctx context.Context, tokenID string) (*markets.Orderbook, error) {
-//	    return marketsClient.GetOrderbook(ctx, tokenID)
+//	fetcher := orderbook.NewSnapshotFetcherFromAPI(func(ctx context.Context, tokenID string) (*orderbook.APIOrderbook, error) {
+//	    ob, err := marketsClient.GetOrderbook(ctx, tokenID)
+//	    if err != nil {
+//	        return nil, err
+//	    }
+//	    return &orderbook.APIOrderbook{
+//	        Bids: convertLevels(ob.Bids),
+//	        Asks: convertLevels(ob.Asks),
+//	    }, nil
 //	})
-//	orderbookSDK.SetSnapshotFetcher(fetcher)
-func CreateSnapshotFetcherFromMarketsClient(
-	getOrderbook func(ctx context.Context, tokenID string) (*OrderbookAPIData, error),
+//	sdk.SetSnapshotFetcher(fetcher)
+func NewSnapshotFetcherFromAPI(
+	getOrderbook func(ctx context.Context, tokenID string) (*APIOrderbook, error),
 ) SnapshotFetcher {
 	return NewFuncSnapshotFetcher(func(ctx context.Context, tokenID string) (bids, asks []PriceLevel, err error) {
 		ob, err := getOrderbook(ctx, tokenID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get orderbook: %w", err)
+			return nil, nil, err
 		}
-
 		if ob == nil {
-			return nil, nil, fmt.Errorf("orderbook is nil")
+			return nil, nil, nil
 		}
 
-		// 转换 bids
 		bids = make([]PriceLevel, 0, len(ob.Bids))
 		for _, bid := range ob.Bids {
 			if bid != nil {
@@ -69,7 +71,6 @@ func CreateSnapshotFetcherFromMarketsClient(
 			}
 		}
 
-		// 转换 asks
 		asks = make([]PriceLevel, 0, len(ob.Asks))
 		for _, ask := range ob.Asks {
 			if ask != nil {
