@@ -274,7 +274,7 @@ func TestSDKUnsubscribeAll(t *testing.T) {
 	}
 }
 
-func TestSDKEvents(t *testing.T) {
+func TestSDKUpdates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 		conn, _ := upgrader.Upgrade(w, r, nil)
@@ -296,9 +296,9 @@ func TestSDKEvents(t *testing.T) {
 	sdk.Start(ctx)
 	defer sdk.Stop()
 
-	events := sdk.Events()
-	if events == nil {
-		t.Error("Events() should not return nil")
+	updates := sdk.Updates()
+	if updates == nil {
+		t.Error("Updates() should not return nil")
 	}
 }
 

@@ -11,14 +11,13 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// SnapshotFetcher 定义获取订单簿快照的接口
-// 这允许外部注入 markets.Client 来获取快照
+// SnapshotFetcher defines the interface for fetching orderbook snapshots
 type SnapshotFetcher interface {
-	// GetOrderbookSnapshot 获取指定 tokenID 的订单簿快照
 	GetOrderbookSnapshot(ctx context.Context, tokenID string) (bids, asks []PriceLevel, err error)
 }
 
 // SDK provides a high-level interface for managing orderbooks via WebSocket
+// Uses callback pattern (like Polymarket SDK) - simplified event handling
 type SDK struct {
 	config          *Config
 	wsClient        *WSClient
@@ -30,7 +29,7 @@ type SDK struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	started          bool
-	validationCancel context.CancelFunc // For stopping periodic validation
+	validationCancel context.CancelFunc
 }
 
 // NewSDK creates a new orderbook SDK instance
@@ -45,16 +44,21 @@ func NewSDK(config *Config) *SDK {
 	// Create rate limiter: 10 requests/second, burst of 5
 	rateLimiter := common.NewRateLimiter(10, 5)
 
-	return &SDK{
+	sdk := &SDK{
 		config:      config,
 		wsClient:    wsClient,
 		manager:     manager,
 		rateLimiter: rateLimiter,
 	}
+
+	// Set up reconnect handler on manager
+	// This replaces the old handleReconnectEvents goroutine
+	manager.SetReconnectHandler(sdk.refreshAllSnapshots)
+
+	return sdk
 }
 
-// SetSnapshotFetcher 设置快照获取器
-// 必须在订阅前调用，否则订单簿无法正确初始化
+// SetSnapshotFetcher sets the snapshot fetcher
 func (s *SDK) SetSnapshotFetcher(fetcher SnapshotFetcher) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,15 +82,6 @@ func (s *SDK) Start(ctx context.Context) error {
 	// Create internal context
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	// Start manager
-	if err := s.manager.Start(s.ctx); err != nil {
-		s.wsClient.Disconnect()
-		return fmt.Errorf("failed to start manager: %w", err)
-	}
-
-	// Start reconnect handler to refresh snapshots on reconnection
-	go s.handleReconnectEvents()
-
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
@@ -94,25 +89,8 @@ func (s *SDK) Start(ctx context.Context) error {
 	return nil
 }
 
-// handleReconnectEvents listens for reconnect events and refreshes snapshots
-func (s *SDK) handleReconnectEvents() {
-	events := s.wsClient.Events()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
-			if event.Type == EventReconnected {
-				s.refreshAllSnapshots()
-			}
-		}
-	}
-}
-
 // refreshAllSnapshots refreshes snapshots for all registered market token pairs
+// Called by Manager on reconnect via callback
 func (s *SDK) refreshAllSnapshots() {
 	s.mu.RLock()
 	fetcher := s.snapshotFetcher
@@ -135,7 +113,7 @@ func (s *SDK) refreshAllSnapshots() {
 		s.manager.MarkUninitialized(pair.YesTokenID)
 		s.manager.MarkUninitialized(pair.NoTokenID)
 
-		// 清空 pendingDiffs，确保只保留快照获取期间和之后的 diff
+		// Clear pending diffs
 		s.manager.ClearPendingDiffs(pair.YesTokenID)
 		s.manager.ClearPendingDiffs(pair.NoTokenID)
 
@@ -202,42 +180,7 @@ func (s *SDK) Subscribe(marketID int64) error {
 	return s.wsClient.SubscribeDepth(marketID)
 }
 
-//
-//// SubscribeWithSnapshot 订阅订单簿更新并自动获取初始快照
-//// 这是推荐的订阅方式，确保订单簿能正确初始化
-//// tokenID 是需要订阅的 token ID (yesTokenId 或 noTokenId)
-//func (s *SDK) SubscribeWithSnapshot(ctx context.Context, marketID int64, tokenID string) error {
-//	s.mu.RLock()
-//	fetcher := s.snapshotFetcher
-//	s.mu.RUnlock()
-//
-//	if fetcher == nil {
-//		return fmt.Errorf("snapshot fetcher not set, call SetSnapshotFetcher first")
-//	}
-//
-//	// 1. 先订阅 WebSocket 增量更新
-//	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
-//		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
-//	}
-//
-//	// 2. 获取订单簿快照
-//	bids, asks, err := fetcher.GetOrderbookSnapshot(ctx, tokenID)
-//	if err != nil {
-//		log.Printf("[OrderbookSDK] Warning: failed to get snapshot for token %s: %v", tokenID, err)
-//		// 不返回错误，让 WebSocket 继续工作，等待后续数据
-//		return nil
-//	}
-//
-//	// 3. 应用快照到订单簿
-//	s.manager.ApplySnapshot(marketID, tokenID, bids, asks, time.Now().UnixMilli())
-//	log.Printf("[OrderbookSDK] Applied snapshot for token %s: %d bids, %d asks", tokenID, len(bids), len(asks))
-//
-//	return nil
-//}
-
-// SubscribeMarketWithSnapshot 订阅整个市场（YES 和 NO 两个 token）并自动获取快照
-// 这是最方便的订阅方式，适用于二元市场
-// 会自动注册 token pair 用于镜像同步
+// SubscribeMarketWithSnapshot subscribes to a market with automatic snapshot initialization
 func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, yesTokenID, noTokenID string) error {
 	s.mu.RLock()
 	fetcher := s.snapshotFetcher
@@ -247,24 +190,23 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 		return fmt.Errorf("snapshot fetcher not set, call SetSnapshotFetcher first")
 	}
 
-	// 1. 注册 token pair 用于镜像同步
+	// 1. Register token pair for mirror sync
 	s.manager.RegisterMarketTokenPair(&MarketTokenPair{
 		MarketID:   marketID,
 		YesTokenID: yesTokenID,
 		NoTokenID:  noTokenID,
 	})
 
-	// 2. 订阅 WebSocket
+	// 2. Subscribe to WebSocket
 	if err := s.wsClient.SubscribeDepth(marketID); err != nil {
 		return fmt.Errorf("failed to subscribe to depth updates: %w", err)
 	}
 
-	// 3. 清空 pendingDiffs，确保只保留快照获取期间和之后的 diff
-	// 这样可以避免旧数据覆盖新快照的问题
+	// 3. Clear pending diffs
 	s.manager.ClearPendingDiffs(yesTokenID)
 	s.manager.ClearPendingDiffs(noTokenID)
 
-	// 4. 并行获取两个 token 的快照（带限流）
+	// 4. Fetch snapshots in parallel with rate limiting
 	var wg sync.WaitGroup
 	var yesErr, noErr error
 	var yesBids, yesAsks, noBids, noAsks []PriceLevel
@@ -273,7 +215,6 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 
 	go func() {
 		defer wg.Done()
-		// 限流
 		if err := s.rateLimiter.Wait(ctx); err != nil {
 			yesErr = err
 			return
@@ -283,7 +224,6 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 
 	go func() {
 		defer wg.Done()
-		// 限流
 		if err := s.rateLimiter.Wait(ctx); err != nil {
 			noErr = err
 			return
@@ -293,7 +233,7 @@ func (s *SDK) SubscribeMarketWithSnapshot(ctx context.Context, marketID int64, y
 
 	wg.Wait()
 
-	// 5. 应用快照（会自动应用 pendingDiffs 中的增量更新）
+	// 5. Apply snapshots
 	timestamp := time.Now().UnixMilli()
 
 	if yesErr != nil {
@@ -367,9 +307,9 @@ func (s *SDK) SubscribeTradeRecords() error {
 	return s.wsClient.SubscribeTradeRecords()
 }
 
-// Events returns the event channel
-func (s *SDK) Events() <-chan *Event {
-	return s.manager.Events()
+// Updates returns the update notification channel (like Polymarket SDK)
+func (s *SDK) Updates() <-chan OrderBookUpdate {
+	return s.manager.Updates()
 }
 
 // GetBBO returns the best bid and offer for a token
@@ -472,7 +412,7 @@ func (s *SDK) IsOrderBookInitialized(tokenID string) bool {
 	return s.manager.IsOrderBookInitialized(tokenID)
 }
 
-// GetPendingDiffCount returns the number of pending diffs for a token (waiting for snapshot)
+// GetPendingDiffCount returns the number of pending diffs for a token
 func (s *SDK) GetPendingDiffCount(tokenID string) int {
 	return s.manager.GetPendingDiffCount(tokenID)
 }
@@ -501,24 +441,6 @@ func (s *SDK) GetManager() *Manager {
 	return s.manager
 }
 
-// WaitForConnection waits for the WebSocket connection to be established
-func (s *SDK) WaitForConnection(ctx context.Context) error {
-	events := s.wsClient.Events()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case event := <-events:
-			if event.Type == EventConnected {
-				return nil
-			}
-			if event.Type == EventError {
-				return event.Error
-			}
-		}
-	}
-}
-
 // String returns a string representation of the SDK state
 func (s *SDK) String() string {
 	s.mu.RLock()
@@ -534,9 +456,6 @@ func (s *SDK) GetHealthStatus() *HealthStatus {
 }
 
 // StartPeriodicValidation starts periodic orderbook validation
-// interval: how often to validate (recommended: 30-60 seconds)
-// This fetches fresh snapshots from the API and corrects any drift
-// Note: Must be called after Start(), otherwise it will do nothing
 func (s *SDK) StartPeriodicValidation(interval time.Duration) {
 	s.mu.Lock()
 	if s.validationCancel != nil {
@@ -544,7 +463,6 @@ func (s *SDK) StartPeriodicValidation(interval time.Duration) {
 		return // Already running
 	}
 
-	// 检查 SDK 是否已启动
 	if !s.started || s.ctx == nil {
 		s.mu.Unlock()
 		log.Printf("[OrderbookSDK] Warning: StartPeriodicValidation called before Start(), ignoring")
@@ -625,7 +543,6 @@ func (s *SDK) validateAllOrderBooks() {
 }
 
 // ValidateOrderBook validates a single orderbook against the API snapshot
-// If differences are found, the local orderbook is corrected
 func (s *SDK) ValidateOrderBook(ctx context.Context, marketID int64, tokenID string) *ValidationResult {
 	result := &ValidationResult{TokenID: tokenID}
 

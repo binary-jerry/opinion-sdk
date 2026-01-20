@@ -1,7 +1,6 @@
 package orderbook
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -439,31 +438,21 @@ func TestManagerString(t *testing.T) {
 	}
 }
 
-func TestManagerStartStop(t *testing.T) {
+func TestManagerStop(t *testing.T) {
 	wsClient := NewWSClient(nil)
 	manager := NewManager(wsClient)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := manager.Start(ctx)
-	if err != nil {
-		t.Errorf("Start() error: %v", err)
-	}
-
-	// Give some time for goroutine to start
-	time.Sleep(10 * time.Millisecond)
-
+	// Stop should be safe to call
 	manager.Stop()
 }
 
-func TestManagerEvents(t *testing.T) {
+func TestManagerUpdates(t *testing.T) {
 	wsClient := NewWSClient(nil)
 	manager := NewManager(wsClient)
 
-	events := manager.Events()
-	if events == nil {
-		t.Error("Events() should not return nil")
+	updates := manager.Updates()
+	if updates == nil {
+		t.Error("Updates() should not return nil")
 	}
 }
 
@@ -474,26 +463,9 @@ func TestManagerHandleDepthUpdate(t *testing.T) {
 	// First initialize the orderbook (required for depth updates to be applied)
 	manager.ApplySnapshot(123, "token-1", nil, nil, time.Now().UnixMilli())
 
-	// Simulate depth update event
-	diffMsg := &DepthDiffMessage{
-		Channel:  ChannelDepthDiff,
-		MarketID: 123,
-		TokenID:  "token-1",
-		Bids: []PriceLevelDiff{
-			{Price: decimal.NewFromFloat(0.50), Size: decimal.NewFromInt(100)},
-		},
-		Asks:     []PriceLevelDiff{},
-		Sequence: 1,
-	}
-
-	event := &Event{
-		Type:     EventDepthUpdate,
-		MarketID: 123,
-		TokenID:  "token-1",
-		Data:     diffMsg,
-	}
-
-	manager.handleEvent(event)
+	// Simulate depth update via handleMessage (msgType format)
+	jsonMsg := `{"msgType":"market.depth.diff","marketId":123,"tokenId":"token-1","side":"bids","price":"0.50","size":"100","outcomeSide":1}`
+	manager.handleMessage([]byte(jsonMsg))
 
 	ob := manager.GetOrderBook("token-1")
 	if ob == nil {
@@ -508,22 +480,9 @@ func TestManagerHandlePriceUpdate(t *testing.T) {
 	wsClient := NewWSClient(nil)
 	manager := NewManager(wsClient)
 
-	priceMsg := &LastPriceMessage{
-		Channel:   ChannelLastPrice,
-		MarketID:  123,
-		TokenID:   "token-1",
-		Price:     decimal.NewFromFloat(0.55),
-		Timestamp: 1704067200000,
-	}
-
-	event := &Event{
-		Type:     EventPriceUpdate,
-		MarketID: 123,
-		TokenID:  "token-1",
-		Data:     priceMsg,
-	}
-
-	manager.handleEvent(event)
+	// Simulate price update via handleMessage (msgType format)
+	jsonMsg := `{"msgType":"market.last.price","marketId":123,"tokenId":"token-1","price":"0.55","timestamp":1704067200000}`
+	manager.handleMessage([]byte(jsonMsg))
 
 	price := manager.GetLastPrice("token-1")
 	if !price.Equal(decimal.NewFromFloat(0.55)) {
@@ -764,25 +723,9 @@ func TestBufferPendingDiffsBeforeInit(t *testing.T) {
 	// Create uninitialized orderbook
 	manager.GetOrCreateOrderBook(TestMarketID, TestYesTokenID)
 
-	// Simulate receiving depth diff before initialization via handleSingleDepthDiff
-	msg := &SingleDepthDiffMessage{
-		MsgType:     ChannelDepthDiff,
-		MarketID:    TestMarketID,
-		TokenID:     TestYesTokenID,
-		OutcomeSide: OutcomeSideYES,
-		Side:        "bids",
-		Price:       "0.50",
-		Size:        "100",
-	}
-
-	// Simulate event handling
-	event := &Event{
-		Type:     EventDepthUpdate,
-		MarketID: TestMarketID,
-		TokenID:  TestYesTokenID,
-		Data:     msg,
-	}
-	manager.handleEvent(event)
+	// Simulate receiving depth diff before initialization via handleMessage
+	jsonMsg := `{"msgType":"market.depth.diff","marketId":3892,"tokenId":"` + TestYesTokenID + `","outcomeSide":1,"side":"bids","price":"0.50","size":"100"}`
+	manager.handleMessage([]byte(jsonMsg))
 
 	// Verify diff is buffered
 	if manager.GetPendingDiffCount(TestYesTokenID) != 1 {
@@ -877,23 +820,8 @@ func TestHandleSingleDepthDiffWithMirrorSync(t *testing.T) {
 
 	// Simulate YES token ask update at 0.60
 	// Expected mirror: NO bids at 0.40
-	yesAskMsg := &SingleDepthDiffMessage{
-		MsgType:     ChannelDepthDiff,
-		MarketID:    TestMarketID,
-		TokenID:     TestYesTokenID,
-		OutcomeSide: OutcomeSideYES,
-		Side:        "asks",
-		Price:       "0.60",
-		Size:        "500",
-	}
-
-	event := &Event{
-		Type:     EventDepthUpdate,
-		MarketID: TestMarketID,
-		TokenID:  TestYesTokenID,
-		Data:     yesAskMsg,
-	}
-	manager.handleEvent(event)
+	jsonMsg := `{"msgType":"market.depth.diff","marketId":3892,"tokenId":"` + TestYesTokenID + `","outcomeSide":1,"side":"asks","price":"0.60","size":"500"}`
+	manager.handleMessage([]byte(jsonMsg))
 
 	// Verify YES orderbook has ask at 0.60
 	yesAsks := yesOb.GetAllAsks()
@@ -936,23 +864,8 @@ func TestHandleSingleDepthDiffBidToAskMirror(t *testing.T) {
 
 	// Simulate YES token bid update at 0.45
 	// Expected mirror: NO asks at 0.55
-	yesBidMsg := &SingleDepthDiffMessage{
-		MsgType:     ChannelDepthDiff,
-		MarketID:    TestMarketID,
-		TokenID:     TestYesTokenID,
-		OutcomeSide: OutcomeSideYES,
-		Side:        "bids",
-		Price:       "0.45",
-		Size:        "300",
-	}
-
-	event := &Event{
-		Type:     EventDepthUpdate,
-		MarketID: TestMarketID,
-		TokenID:  TestYesTokenID,
-		Data:     yesBidMsg,
-	}
-	manager.handleEvent(event)
+	jsonMsg := `{"msgType":"market.depth.diff","marketId":3892,"tokenId":"` + TestYesTokenID + `","outcomeSide":1,"side":"bids","price":"0.45","size":"300"}`
+	manager.handleMessage([]byte(jsonMsg))
 
 	// Verify YES orderbook has bid at 0.45
 	yesOb := manager.GetOrderBook(TestYesTokenID)

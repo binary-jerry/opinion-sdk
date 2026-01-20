@@ -124,7 +124,7 @@ func TestWSClientConnectAlreadyConnected(t *testing.T) {
 	}
 }
 
-func TestWSClientEvents(t *testing.T) {
+func TestWSClientStateChange(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -144,18 +144,29 @@ func TestWSClientEvents(t *testing.T) {
 	config := &Config{WSEndpoint: wsURL, HeartbeatInterval: 60, BufferSize: 10}
 	client := NewWSClient(config)
 
+	// Set up state change callback - buffer multiple states
+	stateChanged := make(chan ConnectionState, 10)
+	client.SetStateChangeHandler(func(state ConnectionState) {
+		stateChanged <- state
+	})
+
 	ctx := context.Background()
 	client.Connect(ctx)
 	defer client.Close()
 
-	// Should receive connected event
-	select {
-	case event := <-client.Events():
-		if event.Type != EventConnected {
-			t.Errorf("First event type = %v, want EventConnected", event.Type)
+	// Wait for StateConnected (may receive StateConnecting first)
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case state := <-stateChanged:
+			if state == StateConnected {
+				return // Success
+			}
+			// Continue waiting if we got StateConnecting
+		case <-timeout:
+			t.Error("Timeout waiting for connected state")
+			return
 		}
-	case <-time.After(time.Second):
-		t.Error("Timeout waiting for connected event")
 	}
 }
 
@@ -366,28 +377,41 @@ func TestWSClientHandleDepthMessage(t *testing.T) {
 	config := &Config{WSEndpoint: wsURL, HeartbeatInterval: 300, BufferSize: 10}
 	client := NewWSClient(config)
 
+	// Set up message handler
+	receivedMsg := make(chan []byte, 1)
+	client.SetMessageHandler(func(data []byte) {
+		select {
+		case receivedMsg <- data:
+		default:
+		}
+	})
+
 	ctx := context.Background()
 	client.Connect(ctx)
 	defer client.Close()
 
-	// Wait for depth event
-	timeout := time.After(2 * time.Second)
-	for {
-		select {
-		case event := <-client.Events():
-			if event.Type == EventDepthUpdate {
-				if event.MarketID != 123 {
-					t.Errorf("MarketID = %d, want 123", event.MarketID)
-				}
-				if event.TokenID != "token-1" {
-					t.Errorf("TokenID = %s, want token-1", event.TokenID)
-				}
-				return
-			}
-		case <-timeout:
-			t.Error("Timeout waiting for depth event")
-			return
+	// Wait for depth message
+	select {
+	case data := <-receivedMsg:
+		var msg struct {
+			Channel  string `json:"channel"`
+			MarketID int    `json:"marketId"`
+			TokenID  string `json:"tokenId"`
 		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("Failed to unmarshal: %v", err)
+		}
+		if msg.Channel != ChannelDepthDiff {
+			t.Errorf("Channel = %s, want %s", msg.Channel, ChannelDepthDiff)
+		}
+		if msg.MarketID != 123 {
+			t.Errorf("MarketID = %d, want 123", msg.MarketID)
+		}
+		if msg.TokenID != "token-1" {
+			t.Errorf("TokenID = %s, want token-1", msg.TokenID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for depth message")
 	}
 }
 
@@ -415,21 +439,30 @@ func TestWSClientHandlePriceMessage(t *testing.T) {
 	config := &Config{WSEndpoint: wsURL, HeartbeatInterval: 300, BufferSize: 10}
 	client := NewWSClient(config)
 
+	// Set up message handler
+	receivedMsg := make(chan []byte, 1)
+	client.SetMessageHandler(func(data []byte) {
+		select {
+		case receivedMsg <- data:
+		default:
+		}
+	})
+
 	ctx := context.Background()
 	client.Connect(ctx)
 	defer client.Close()
 
-	timeout := time.After(2 * time.Second)
-	for {
-		select {
-		case event := <-client.Events():
-			if event.Type == EventPriceUpdate {
-				return
-			}
-		case <-timeout:
-			t.Error("Timeout waiting for price event")
-			return
+	select {
+	case data := <-receivedMsg:
+		var msg struct {
+			Channel string `json:"channel"`
 		}
+		json.Unmarshal(data, &msg)
+		if msg.Channel != ChannelLastPrice {
+			t.Errorf("Channel = %s, want %s", msg.Channel, ChannelLastPrice)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for price message")
 	}
 }
 
@@ -457,21 +490,30 @@ func TestWSClientHandleTradeMessage(t *testing.T) {
 	config := &Config{WSEndpoint: wsURL, HeartbeatInterval: 300, BufferSize: 10}
 	client := NewWSClient(config)
 
+	// Set up message handler
+	receivedMsg := make(chan []byte, 1)
+	client.SetMessageHandler(func(data []byte) {
+		select {
+		case receivedMsg <- data:
+		default:
+		}
+	})
+
 	ctx := context.Background()
 	client.Connect(ctx)
 	defer client.Close()
 
-	timeout := time.After(2 * time.Second)
-	for {
-		select {
-		case event := <-client.Events():
-			if event.Type == EventTradeUpdate {
-				return
-			}
-		case <-timeout:
-			t.Error("Timeout waiting for trade event")
-			return
+	select {
+	case data := <-receivedMsg:
+		var msg struct {
+			Channel string `json:"channel"`
 		}
+		json.Unmarshal(data, &msg)
+		if msg.Channel != ChannelLastTrade {
+			t.Errorf("Channel = %s, want %s", msg.Channel, ChannelLastTrade)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for trade message")
 	}
 }
 
@@ -502,21 +544,30 @@ func TestWSClientHandleSubscribedEvent(t *testing.T) {
 	config := &Config{WSEndpoint: wsURL, HeartbeatInterval: 300, BufferSize: 10}
 	client := NewWSClient(config)
 
+	// Set up message handler
+	receivedMsg := make(chan []byte, 1)
+	client.SetMessageHandler(func(data []byte) {
+		select {
+		case receivedMsg <- data:
+		default:
+		}
+	})
+
 	ctx := context.Background()
 	client.Connect(ctx)
 	defer client.Close()
 
-	timeout := time.After(2 * time.Second)
-	for {
-		select {
-		case event := <-client.Events():
-			if event.Type == EventSubscribed {
-				return
-			}
-		case <-timeout:
-			t.Error("Timeout waiting for subscribed event")
-			return
+	select {
+	case data := <-receivedMsg:
+		var msg struct {
+			Event string `json:"event"`
 		}
+		json.Unmarshal(data, &msg)
+		if msg.Event != "subscribed" {
+			t.Errorf("Event = %s, want subscribed", msg.Event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for subscribed message")
 	}
 }
 

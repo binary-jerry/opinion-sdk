@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -18,6 +19,7 @@ var (
 )
 
 // WSClient manages the WebSocket connection to Opinion
+// Uses callback pattern (like Polymarket SDK) instead of channels
 type WSClient struct {
 	config *Config
 	conn   *websocket.Conn
@@ -25,13 +27,22 @@ type WSClient struct {
 
 	mu            sync.RWMutex
 	subscriptions map[string]*Subscription
-	eventChan     chan *Event
 	writeChan     chan []byte
-	doneChan      chan struct{}
 	closeChan     chan struct{}
-	closeOnce     sync.Once // 确保 closeChan 只关闭一次
+	closeOnce     sync.Once
 
-	reconnectAttempts int
+	// Callback handlers (like Polymarket SDK)
+	onMessage     func(data []byte)
+	onStateChange func(state ConnectionState)
+
+	// goroutine lifecycle control
+	loopCtx    context.Context
+	loopCancel context.CancelFunc
+	loopWg     sync.WaitGroup
+
+	// Reconnect control
+	reconnectAttempts int32
+	reconnecting      int32 // atomic flag to prevent multiple reconnects
 	lastError         error
 }
 
@@ -48,11 +59,23 @@ func NewWSClient(config *Config) *WSClient {
 		config:        config,
 		state:         StateDisconnected,
 		subscriptions: make(map[string]*Subscription),
-		eventChan:     make(chan *Event, config.BufferSize),
 		writeChan:     make(chan []byte, 100),
-		doneChan:      make(chan struct{}),
 		closeChan:     make(chan struct{}),
 	}
+}
+
+// SetMessageHandler sets the message callback (like Polymarket SDK)
+func (c *WSClient) SetMessageHandler(handler func(data []byte)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onMessage = handler
+}
+
+// SetStateChangeHandler sets the state change callback (like Polymarket SDK)
+func (c *WSClient) SetStateChangeHandler(handler func(state ConnectionState)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onStateChange = handler
 }
 
 // Connect establishes the WebSocket connection
@@ -62,8 +85,12 @@ func (c *WSClient) Connect(ctx context.Context) error {
 		c.mu.Unlock()
 		return nil
 	}
-	c.state = StateConnecting
 	c.mu.Unlock()
+
+	// Stop old goroutines first
+	c.stopLoops()
+
+	c.setState(StateConnecting)
 
 	if err := c.connect(ctx); err != nil {
 		c.setState(StateDisconnected)
@@ -71,18 +98,19 @@ func (c *WSClient) Connect(ctx context.Context) error {
 	}
 
 	c.setState(StateConnected)
-	c.reconnectAttempts = 0
+	atomic.StoreInt32(&c.reconnectAttempts, 0)
+	atomic.StoreInt32(&c.reconnecting, 0)
+
+	// Create new loop context
+	c.mu.Lock()
+	c.loopCtx, c.loopCancel = context.WithCancel(context.Background())
+	c.mu.Unlock()
 
 	// Start read/write/heartbeat loops
+	c.loopWg.Add(3)
 	go c.readLoop()
 	go c.writeLoop()
 	go c.heartbeatLoop()
-
-	// Send connected event
-	c.sendEvent(&Event{
-		Type:      EventConnected,
-		Timestamp: time.Now().UnixMilli(),
-	})
 
 	return nil
 }
@@ -122,25 +150,20 @@ func (c *WSClient) Disconnect() error {
 		return nil
 	}
 
-	// 使用 sync.Once 确保 closeChan 只关闭一次
 	c.closeOnce.Do(func() {
 		close(c.closeChan)
 	})
 
-	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil
-	}
-
+	c.stopLoopsLocked()
+	c.closeConnectionLocked()
 	c.state = StateDisconnected
+
 	return nil
 }
 
 // Close closes the client permanently
 func (c *WSClient) Close() error {
-	c.Disconnect()
-	close(c.doneChan)
-	return nil
+	return c.Disconnect()
 }
 
 // State returns the current connection state
@@ -152,13 +175,15 @@ func (c *WSClient) State() ConnectionState {
 
 func (c *WSClient) setState(state ConnectionState) {
 	c.mu.Lock()
+	oldState := c.state
 	c.state = state
+	handler := c.onStateChange
 	c.mu.Unlock()
-}
 
-// Events returns the event channel
-func (c *WSClient) Events() <-chan *Event {
-	return c.eventChan
+	// Call state change handler outside lock
+	if oldState != state && handler != nil {
+		handler(state)
+	}
 }
 
 // Subscribe subscribes to a channel
@@ -245,34 +270,51 @@ func (c *WSClient) SubscribeTradeRecords() error {
 }
 
 func (c *WSClient) write(data []byte) error {
+	c.mu.RLock()
+	loopCtx := c.loopCtx
+	c.mu.RUnlock()
+
 	select {
 	case c.writeChan <- data:
 		return nil
 	case <-c.closeChan:
 		return ErrClosed
-	case <-c.doneChan:
+	case <-loopCtx.Done():
 		return ErrClosed
+	case <-time.After(5 * time.Second):
+		return context.DeadlineExceeded
 	}
 }
 
-func (c *WSClient) sendEvent(event *Event) {
-	select {
-	case c.eventChan <- event:
-	default:
-		// Drop event if channel is full
+// stopLoops stops all loop goroutines
+func (c *WSClient) stopLoops() {
+	c.mu.Lock()
+	c.stopLoopsLocked()
+	c.mu.Unlock()
+
+	// Wait for all goroutines to exit
+	c.loopWg.Wait()
+}
+
+func (c *WSClient) stopLoopsLocked() {
+	if c.loopCancel != nil {
+		c.loopCancel()
 	}
 }
 
 func (c *WSClient) readLoop() {
-	defer func() {
-		c.handleDisconnect()
-	}()
+	defer c.loopWg.Done()
+	defer c.triggerReconnect()
+
+	c.mu.RLock()
+	loopCtx := c.loopCtx
+	c.mu.RUnlock()
 
 	for {
 		select {
 		case <-c.closeChan:
 			return
-		case <-c.doneChan:
+		case <-loopCtx.Done():
 			return
 		default:
 		}
@@ -291,16 +333,29 @@ func (c *WSClient) readLoop() {
 			return
 		}
 
-		c.handleMessage(message)
+		// Call message handler directly (like Polymarket SDK)
+		c.mu.RLock()
+		handler := c.onMessage
+		c.mu.RUnlock()
+
+		if handler != nil {
+			handler(message)
+		}
 	}
 }
 
 func (c *WSClient) writeLoop() {
+	defer c.loopWg.Done()
+
+	c.mu.RLock()
+	loopCtx := c.loopCtx
+	c.mu.RUnlock()
+
 	for {
 		select {
 		case <-c.closeChan:
 			return
-		case <-c.doneChan:
+		case <-loopCtx.Done():
 			return
 		case data := <-c.writeChan:
 			c.mu.RLock()
@@ -319,6 +374,8 @@ func (c *WSClient) writeLoop() {
 }
 
 func (c *WSClient) heartbeatLoop() {
+	defer c.loopWg.Done()
+
 	interval := time.Duration(c.config.HeartbeatInterval) * time.Second
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -327,18 +384,23 @@ func (c *WSClient) heartbeatLoop() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	c.mu.RLock()
+	loopCtx := c.loopCtx
+	c.mu.RUnlock()
+
 	for {
 		select {
 		case <-c.closeChan:
 			return
-		case <-c.doneChan:
+		case <-loopCtx.Done():
 			return
 		case <-ticker.C:
 			c.mu.RLock()
 			state := c.state
+			conn := c.conn
 			c.mu.RUnlock()
 
-			if state != StateConnected {
+			if state != StateConnected || conn == nil {
 				continue
 			}
 
@@ -349,170 +411,74 @@ func (c *WSClient) heartbeatLoop() {
 	}
 }
 
-func (c *WSClient) handleMessage(data []byte) {
-	// Try to parse as different message types
-	var base ServerMessage
-	if err := json.Unmarshal(data, &base); err != nil {
-		c.sendEvent(&Event{
-			Type:      EventError,
-			Error:     fmt.Errorf("failed to parse message: %w", err),
-			Timestamp: time.Now().UnixMilli(),
-		})
-		return
-	}
-
-	// Check for event notifications first (subscribed/unsubscribed)
-	if base.Event == "subscribed" {
-		c.sendEvent(&Event{
-			Type:      EventSubscribed,
-			MarketID:  base.MarketID,
-			Timestamp: time.Now().UnixMilli(),
-		})
-		return
-	}
-	if base.Event == "unsubscribed" {
-		c.sendEvent(&Event{
-			Type:      EventUnsubscribed,
-			MarketID:  base.MarketID,
-			Timestamp: time.Now().UnixMilli(),
-		})
-		return
-	}
-
-	// Check for msgType field (actual WebSocket format uses msgType instead of channel)
-	var msgTypeCheck struct {
-		MsgType string `json:"msgType"`
-	}
-	_ = json.Unmarshal(data, &msgTypeCheck)
-
-	// Handle actual WebSocket format (single price level with msgType)
-	if msgTypeCheck.MsgType == ChannelDepthDiff {
-		var msg SingleDepthDiffMessage
-		if err := json.Unmarshal(data, &msg); err == nil {
-			c.sendEvent(&Event{
-				Type:      EventDepthUpdate,
-				MarketID:  msg.MarketID,
-				TokenID:   msg.TokenID,
-				Data:      &msg,
-				Timestamp: time.Now().UnixMilli(),
-			})
-		}
-		return
-	}
-
-	switch base.Channel {
-	case ChannelDepthDiff:
-		// Legacy format with bids/asks arrays (kept for backward compatibility)
-		var msg DepthDiffMessage
-		if err := json.Unmarshal(data, &msg); err == nil {
-			c.sendEvent(&Event{
-				Type:      EventDepthUpdate,
-				MarketID:  msg.MarketID,
-				TokenID:   msg.TokenID,
-				Data:      &msg,
-				Timestamp: time.Now().UnixMilli(),
-			})
-		}
-
-	case ChannelLastPrice:
-		var msg LastPriceMessage
-		if err := json.Unmarshal(data, &msg); err == nil {
-			c.sendEvent(&Event{
-				Type:      EventPriceUpdate,
-				MarketID:  msg.MarketID,
-				TokenID:   msg.TokenID,
-				Data:      &msg,
-				Timestamp: time.Now().UnixMilli(),
-			})
-		}
-
-	case ChannelLastTrade:
-		var msg LastTradeMessage
-		if err := json.Unmarshal(data, &msg); err == nil {
-			c.sendEvent(&Event{
-				Type:      EventTradeUpdate,
-				MarketID:  msg.MarketID,
-				TokenID:   msg.TokenID,
-				Data:      &msg,
-				Timestamp: time.Now().UnixMilli(),
-			})
-		}
-
-	case ChannelOrderUpdate:
-		var msg OrderUpdateMessage
-		if err := json.Unmarshal(data, &msg); err == nil {
-			c.sendEvent(&Event{
-				Type:      EventOrderUpdate,
-				MarketID:  msg.MarketID,
-				TokenID:   msg.TokenID,
-				Data:      &msg,
-				Timestamp: time.Now().UnixMilli(),
-			})
-		}
-
-	case ChannelTradeRecord:
-		var msg TradeRecordMessage
-		if err := json.Unmarshal(data, &msg); err == nil {
-			c.sendEvent(&Event{
-				Type:      EventTradeRecord,
-				MarketID:  msg.MarketID,
-				TokenID:   msg.TokenID,
-				Data:      &msg,
-				Timestamp: time.Now().UnixMilli(),
-			})
-		}
-
-	default:
-		// Unknown message type, ignore
-	}
-}
-
-func (c *WSClient) handleDisconnect() {
-	c.sendEvent(&Event{
-		Type:      EventDisconnected,
-		Error:     c.lastError,
-		Timestamp: time.Now().UnixMilli(),
-	})
-
-	// Check if we should reconnect
+// triggerReconnect triggers reconnection (ensures only triggered once)
+func (c *WSClient) triggerReconnect() {
+	// Check if already closed
 	select {
-	case <-c.doneChan:
-		return
 	case <-c.closeChan:
 		return
 	default:
 	}
 
-	c.reconnect()
+	// Use CAS to ensure only one goroutine triggers reconnect
+	if !atomic.CompareAndSwapInt32(&c.reconnecting, 0, 1) {
+		return
+	}
+
+	// Cancel loopCtx to notify all loop goroutines to exit
+	c.mu.Lock()
+	if c.loopCancel != nil {
+		c.loopCancel()
+	}
+	c.mu.Unlock()
+
+	c.closeConnection()
+	c.setState(StateReconnecting)
+
+	// Start reconnect in new goroutine
+	go c.reconnect()
+}
+
+// closeConnection closes current connection (doesn't trigger reconnect)
+func (c *WSClient) closeConnection() {
+	c.mu.Lock()
+	c.closeConnectionLocked()
+	c.mu.Unlock()
+}
+
+func (c *WSClient) closeConnectionLocked() {
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
 }
 
 func (c *WSClient) reconnect() {
-	c.setState(StateReconnecting)
+	// Wait for old goroutines to exit
+	c.loopWg.Wait()
 
-	c.sendEvent(&Event{
-		Type:      EventReconnecting,
-		Timestamp: time.Now().UnixMilli(),
-	})
+	// Drain writeChan
+	c.drainWriteChan()
 
 	maxAttempts := c.config.MaxReconnectAttempts
 	delay := time.Duration(c.config.ReconnectDelay) * time.Millisecond
 
 	for {
-		c.reconnectAttempts++
+		select {
+		case <-c.closeChan:
+			return
+		default:
+		}
 
-		if maxAttempts > 0 && c.reconnectAttempts > maxAttempts {
+		attempts := atomic.AddInt32(&c.reconnectAttempts, 1)
+
+		if maxAttempts > 0 && int(attempts) > maxAttempts {
 			c.setState(StateDisconnected)
-			c.sendEvent(&Event{
-				Type:      EventError,
-				Error:     errors.New("max reconnect attempts exceeded"),
-				Timestamp: time.Now().UnixMilli(),
-			})
+			atomic.StoreInt32(&c.reconnecting, 0)
 			return
 		}
 
 		select {
-		case <-c.doneChan:
-			return
 		case <-c.closeChan:
 			return
 		case <-time.After(delay):
@@ -533,33 +499,34 @@ func (c *WSClient) reconnect() {
 
 		// Reconnected successfully
 		c.setState(StateConnected)
-		c.reconnectAttempts = 0
+		atomic.StoreInt32(&c.reconnectAttempts, 0)
+		atomic.StoreInt32(&c.reconnecting, 0)
 
-		// 重新创建 closeChan 和 closeOnce，以便新的 goroutine 可以正常工作
+		// Create new loop context
 		c.mu.Lock()
-		c.closeChan = make(chan struct{})
-		c.closeOnce = sync.Once{}
+		c.loopCtx, c.loopCancel = context.WithCancel(context.Background())
 		c.mu.Unlock()
 
 		// Restart loops
+		c.loopWg.Add(3)
 		go c.readLoop()
 		go c.writeLoop()
 		go c.heartbeatLoop()
 
-		c.sendEvent(&Event{
-			Type:      EventConnected,
-			Timestamp: time.Now().UnixMilli(),
-		})
-
 		// Resubscribe to all channels
 		c.resubscribe()
 
-		// Send reconnected event (after resubscribe) to trigger snapshot refresh
-		c.sendEvent(&Event{
-			Type:      EventReconnected,
-			Timestamp: time.Now().UnixMilli(),
-		})
 		return
+	}
+}
+
+func (c *WSClient) drainWriteChan() {
+	for {
+		select {
+		case <-c.writeChan:
+		default:
+			return
+		}
 	}
 }
 

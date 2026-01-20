@@ -1,7 +1,7 @@
 package orderbook
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -10,119 +10,119 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// OrderBookUpdate represents an orderbook update notification (like Polymarket SDK)
+// Only contains metadata, not the full orderbook data
+type OrderBookUpdate struct {
+	TokenID   string
+	EventType string // "depth_update", "snapshot"
+	Timestamp int64
+}
+
 // Manager manages orderbooks for multiple markets/tokens
+// Uses callback pattern (like Polymarket SDK) - no eventChan
 type Manager struct {
 	mu               sync.RWMutex
-	orderbooks       map[string]*OrderBook           // tokenID -> orderbook
-	prices           map[string]decimal.Decimal      // tokenID -> last price
-	pendingDiffs     map[string][]*SingleDepthDiffMessage // tokenID -> pending diffs before snapshot
-	marketTokenPairs map[int64]*MarketTokenPair      // marketID -> token pair (for mirror sync)
-	tokenToMarket    map[string]int64                // tokenID -> marketID (reverse lookup)
+	orderbooks       map[string]*OrderBook                  // tokenID -> orderbook
+	prices           map[string]decimal.Decimal             // tokenID -> last price
+	pendingDiffs     map[string][]*SingleDepthDiffMessage   // tokenID -> pending diffs before snapshot
+	marketTokenPairs map[int64]*MarketTokenPair             // marketID -> token pair (for mirror sync)
+	tokenToMarket    map[string]int64                       // tokenID -> marketID (reverse lookup)
 	wsClient         *WSClient
-	eventChan        chan *Event
-	doneChan         chan struct{}
+
+	// Update notification channel (like Polymarket SDK)
+	// Only sends notifications, not full events
+	updateChan chan OrderBookUpdate
+
+	// Snapshot refresh callback (called on reconnect)
+	onReconnect func()
+
+	closeChan chan struct{}
+	closeOnce sync.Once
 }
 
 // NewManager creates a new orderbook manager
 func NewManager(wsClient *WSClient) *Manager {
-	return &Manager{
+	m := &Manager{
 		orderbooks:       make(map[string]*OrderBook),
 		prices:           make(map[string]decimal.Decimal),
 		pendingDiffs:     make(map[string][]*SingleDepthDiffMessage),
 		marketTokenPairs: make(map[int64]*MarketTokenPair),
 		tokenToMarket:    make(map[string]int64),
 		wsClient:         wsClient,
-		eventChan:        make(chan *Event, 100),
-		doneChan:         make(chan struct{}),
+		updateChan:       make(chan OrderBookUpdate, 100),
+		closeChan:        make(chan struct{}),
 	}
+
+	// Set up callbacks on WSClient (like Polymarket SDK)
+	wsClient.SetMessageHandler(m.handleMessage)
+	wsClient.SetStateChangeHandler(m.handleStateChange)
+
+	return m
 }
 
-// Start begins processing events from the WebSocket client
-func (m *Manager) Start(ctx context.Context) error {
-	go m.processEvents(ctx)
-	return nil
+// SetReconnectHandler sets the callback for reconnection events
+// This allows SDK to refresh snapshots on reconnect
+func (m *Manager) SetReconnectHandler(handler func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onReconnect = handler
+}
+
+// Updates returns the update notification channel (like Polymarket SDK)
+func (m *Manager) Updates() <-chan OrderBookUpdate {
+	return m.updateChan
 }
 
 // Stop stops the manager
 func (m *Manager) Stop() {
-	close(m.doneChan)
+	m.closeOnce.Do(func() {
+		close(m.closeChan)
+		close(m.updateChan)
+	})
 }
 
-// Events returns the event channel for external consumers
-func (m *Manager) Events() <-chan *Event {
-	return m.eventChan
+// handleStateChange handles WebSocket state changes (callback from WSClient)
+func (m *Manager) handleStateChange(state ConnectionState) {
+	switch state {
+	case StateConnected:
+		// Connection established, trigger reconnect handler if set
+		m.mu.RLock()
+		handler := m.onReconnect
+		m.mu.RUnlock()
+
+		if handler != nil {
+			// Run in goroutine to avoid blocking
+			go handler()
+		}
+
+	case StateDisconnected, StateReconnecting:
+		// Connection lost - clear all orderbooks to ensure data consistency
+		m.clearAllOrderBooks()
+	}
 }
 
-func (m *Manager) processEvents(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-m.doneChan:
-			return
-		case event := <-m.wsClient.Events():
-			m.handleEvent(event)
-			// Forward event to external consumers
-			select {
-			case m.eventChan <- event:
-			default:
-			}
+// handleMessage handles WebSocket messages (callback from WSClient)
+func (m *Manager) handleMessage(data []byte) {
+	var msg struct {
+		MsgType string `json:"msgType"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("[Manager] failed to parse message: %v", err)
+		return
+	}
+
+	switch msg.MsgType {
+	case ChannelDepthDiff:
+		var diff SingleDepthDiffMessage
+		if err := json.Unmarshal(data, &diff); err == nil {
+			m.handleSingleDepthDiff(&diff)
+		}
+	case ChannelLastPrice:
+		var price LastPriceMessage
+		if err := json.Unmarshal(data, &price); err == nil {
+			m.handlePriceUpdate(&price)
 		}
 	}
-}
-
-func (m *Manager) handleEvent(event *Event) {
-	switch event.Type {
-	case EventDepthUpdate:
-		m.handleDepthUpdate(event)
-	case EventPriceUpdate:
-		m.handlePriceUpdate(event)
-	case EventConnected:
-		// Connection established
-	case EventDisconnected:
-		// Connection lost - clear all orderbooks to ensure data consistency on reconnect
-		m.clearAllOrderBooks()
-	case EventReconnecting:
-		// Attempting to reconnect - clear orderbooks to avoid stale data
-		m.clearAllOrderBooks()
-	}
-}
-
-func (m *Manager) handleDepthUpdate(event *Event) {
-	// Handle SingleDepthDiffMessage (actual WebSocket format)
-	if singleDiff, ok := event.Data.(*SingleDepthDiffMessage); ok {
-		m.handleSingleDepthDiff(singleDiff)
-		return
-	}
-
-	// Handle legacy DepthDiffMessage format (backward compatibility)
-	diff, ok := event.Data.(*DepthDiffMessage)
-	if !ok {
-		return
-	}
-
-	// Validate tokenID to avoid creating invalid orderbooks
-	if diff.TokenID == "" {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	ob, exists := m.orderbooks[diff.TokenID]
-	if !exists {
-		ob = NewOrderBook(diff.MarketID, diff.TokenID)
-		m.orderbooks[diff.TokenID] = ob
-	}
-
-	// If orderbook is not initialized, skip (no buffering for legacy format)
-	if !ob.IsInitialized() {
-		return
-	}
-
-	// Apply the diff with current timestamp
-	timestamp := time.Now().UnixMilli()
-	ob.ApplyDiff(diff.Bids, diff.Asks, diff.Sequence, timestamp)
 }
 
 // handleSingleDepthDiff processes a single price level update with mirror sync
@@ -142,22 +142,17 @@ func (m *Manager) handleSingleDepthDiff(msg *SingleDepthDiffMessage) {
 	// Get the market token pair for mirror sync
 	pair := m.marketTokenPairs[msg.MarketID]
 
-	// 修复：优先使用 msg.TokenID 来确定目标 token，而非 OutcomeSide
-	// OutcomeSide 表示订单方向（买YES/买NO），不是目标订单簿
 	currentTokenID := msg.TokenID
 	var mirrorTokenID string
 
 	if pair != nil {
-		// 根据 tokenID 匹配 pair 来确定镜像 token
 		if currentTokenID == pair.YesTokenID {
 			mirrorTokenID = pair.NoTokenID
 		} else if currentTokenID == pair.NoTokenID {
 			mirrorTokenID = pair.YesTokenID
 		}
-		// 如果 tokenID 不匹配 pair 中的任何一个，不进行镜像同步
 	}
 
-	// Validate tokenID to avoid creating invalid orderbooks with empty key
 	if currentTokenID == "" {
 		return
 	}
@@ -169,26 +164,31 @@ func (m *Manager) handleSingleDepthDiff(msg *SingleDepthDiffMessage) {
 		m.orderbooks[currentTokenID] = ob
 	}
 
+	timestamp := time.Now().UnixMilli()
+
 	// If orderbook is not initialized, buffer the diff
 	if !ob.IsInitialized() {
 		pending := m.pendingDiffs[currentTokenID]
 		if len(pending) < 1000 {
 			m.pendingDiffs[currentTokenID] = append(pending, msg)
 		}
-		// 注意：这里不 return，继续处理镜像 token
-		// 因为镜像 token 可能已经初始化，需要更新
 	} else {
 		// Apply update to current token's orderbook
 		m.applyPriceUpdate(currentTokenID, msg.Side, price, size)
+
+		// Send update notification
+		m.sendUpdate(OrderBookUpdate{
+			TokenID:   currentTokenID,
+			EventType: "depth_update",
+			Timestamp: timestamp,
+		})
 	}
 
 	// Mirror sync: update the other token's orderbook
 	if mirrorTokenID != "" {
-		// 计算镜像数据
 		mirrorPrice := decimal.NewFromInt(1).Sub(price)
 		mirrorSide := m.getMirrorSide(msg.Side)
 
-		// 确保镜像 token 的订单簿存在
 		mirrorOb, exists := m.orderbooks[mirrorTokenID]
 		if !exists {
 			mirrorOb = NewOrderBook(msg.MarketID, mirrorTokenID)
@@ -196,10 +196,16 @@ func (m *Manager) handleSingleDepthDiff(msg *SingleDepthDiffMessage) {
 		}
 
 		if mirrorOb.IsInitialized() {
-			// 镜像订单簿已初始化，直接应用更新
 			m.applyPriceUpdate(mirrorTokenID, mirrorSide, mirrorPrice, size)
+
+			// Send update notification for mirror token
+			m.sendUpdate(OrderBookUpdate{
+				TokenID:   mirrorTokenID,
+				EventType: "depth_update",
+				Timestamp: timestamp,
+			})
 		} else {
-			// 镜像订单簿未初始化，将镜像数据放入 pendingDiffs
+			// Buffer mirror diff
 			mirrorMsg := &SingleDepthDiffMessage{
 				MsgType:     msg.MsgType,
 				MarketID:    msg.MarketID,
@@ -225,8 +231,6 @@ func (m *Manager) applyPriceUpdate(tokenID, side string, price, size decimal.Dec
 	}
 
 	timestamp := time.Now().UnixMilli()
-
-	// Create a single-element diff
 	diff := PriceLevelDiff{Price: price, Size: size}
 
 	if side == "bids" {
@@ -244,15 +248,27 @@ func (m *Manager) getMirrorSide(side string) string {
 	return "asks"
 }
 
-func (m *Manager) handlePriceUpdate(event *Event) {
-	msg, ok := event.Data.(*LastPriceMessage)
-	if !ok {
-		return
-	}
-
+func (m *Manager) handlePriceUpdate(msg *LastPriceMessage) {
 	m.mu.Lock()
 	m.prices[msg.TokenID] = msg.Price
 	m.mu.Unlock()
+}
+
+// sendUpdate sends an update notification (non-blocking)
+func (m *Manager) sendUpdate(update OrderBookUpdate) {
+	select {
+	case m.updateChan <- update:
+	default:
+		// Channel full, drop oldest and retry
+		select {
+		case <-m.updateChan:
+		default:
+		}
+		select {
+		case m.updateChan <- update:
+		default:
+		}
+	}
 }
 
 // GetOrderBook returns the orderbook for a token
@@ -430,7 +446,6 @@ func (m *Manager) GetTokenIDs() []string {
 }
 
 // ApplySnapshot applies a full orderbook snapshot for a token
-// After applying snapshot, pending diffs are applied to ensure no data is lost
 func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []PriceLevel, timestamp int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -441,16 +456,12 @@ func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []Pri
 		m.orderbooks[tokenID] = ob
 	}
 
-	// Apply snapshot with sequence=0 (not used)
 	ob.ApplySnapshot(bids, asks, 0, timestamp)
 
-	// 应用 pendingDiffs 中缓存的增量更新
-	// 虽然没有 sequence 来精确判断顺序，但这些 diff 都是在订阅后收到的
-	// 应用它们可以确保不丢失快照获取期间的更新
+	// Apply pending diffs
 	pendingMsgs := m.pendingDiffs[tokenID]
 	if len(pendingMsgs) > 0 {
-		log.Printf("[OrderbookManager] Applying %d pending diffs for token %s", len(pendingMsgs), tokenID)
-		appliedCount := 0
+		log.Printf("[Manager] Applying %d pending diffs for token %s", len(pendingMsgs), tokenID)
 		for _, msg := range pendingMsgs {
 			price, err := decimal.NewFromString(msg.Price)
 			if err != nil {
@@ -461,17 +472,19 @@ func (m *Manager) ApplySnapshot(marketID int64, tokenID string, bids, asks []Pri
 				continue
 			}
 			m.applyPriceUpdateInternal(ob, msg.Side, price, size)
-			appliedCount++
-			log.Printf("[OrderbookManager] Applied pending diff: token=%s side=%s price=%s size=%s",
-				tokenID, msg.Side, msg.Price, msg.Size)
 		}
-		log.Printf("[OrderbookManager] Applied %d/%d pending diffs for token %s", appliedCount, len(pendingMsgs), tokenID)
-		// 清空已应用的 pendingDiffs
 		delete(m.pendingDiffs, tokenID)
 	}
+
+	// Send snapshot notification
+	m.sendUpdate(OrderBookUpdate{
+		TokenID:   tokenID,
+		EventType: "snapshot",
+		Timestamp: timestamp,
+	})
 }
 
-// applyPriceUpdateInternal 直接在订单簿上应用价格更新（内部方法，无锁）
+// applyPriceUpdateInternal applies price update without lock
 func (m *Manager) applyPriceUpdateInternal(ob *OrderBook, side string, price, size decimal.Decimal) {
 	if ob == nil || !ob.IsInitialized() {
 		return
@@ -488,7 +501,6 @@ func (m *Manager) applyPriceUpdateInternal(ob *OrderBook, side string, price, si
 }
 
 // HealthCheck returns true if the manager is healthy
-// Checks: WebSocket connected, at least one initialized orderbook, no stale data
 func (m *Manager) HealthCheck() bool {
 	if m.wsClient.State() != StateConnected {
 		return false
@@ -497,7 +509,6 @@ func (m *Manager) HealthCheck() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// If no orderbooks registered yet, consider healthy
 	if len(m.orderbooks) == 0 {
 		return true
 	}
@@ -509,14 +520,12 @@ func (m *Manager) HealthCheck() bool {
 		if !ob.IsInitialized() {
 			continue
 		}
-		// At least one initialized orderbook, check if it's stale
 		if now-ob.Timestamp() > staleThreshold {
 			return false
 		}
-		return true // At least one healthy orderbook
+		return true
 	}
 
-	// No initialized orderbooks
 	return false
 }
 
@@ -526,7 +535,7 @@ func (m *Manager) GetHealthStatus() *HealthStatus {
 	defer m.mu.RUnlock()
 
 	now := time.Now().UnixMilli()
-	staleThreshold := int64(5 * 60 * 1000) // 5 minutes
+	staleThreshold := int64(5 * 60 * 1000)
 
 	status := &HealthStatus{
 		Connected:      m.wsClient.State() == StateConnected,
@@ -569,16 +578,16 @@ func (m *Manager) GetConnectionState() ConnectionState {
 
 // MarketSummary contains summary information for a market
 type MarketSummary struct {
-	TokenID    string
-	BestBid    decimal.Decimal
-	BestAsk    decimal.Decimal
-	MidPrice   decimal.Decimal
-	Spread     decimal.Decimal
-	SpreadBps  decimal.Decimal
-	BidCount   int
-	AskCount   int
-	LastPrice  decimal.Decimal
-	UpdatedAt  time.Time
+	TokenID   string
+	BestBid   decimal.Decimal
+	BestAsk   decimal.Decimal
+	MidPrice  decimal.Decimal
+	Spread    decimal.Decimal
+	SpreadBps decimal.Decimal
+	BidCount  int
+	AskCount  int
+	LastPrice decimal.Decimal
+	UpdatedAt time.Time
 }
 
 // GetMarketSummary returns a summary for a token
@@ -658,7 +667,6 @@ func (m *Manager) String() string {
 }
 
 // clearAllOrderBooks clears all orderbooks and pending diffs
-// Called on disconnect/reconnect to ensure data consistency
 func (m *Manager) clearAllOrderBooks() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -666,7 +674,6 @@ func (m *Manager) clearAllOrderBooks() {
 	for _, ob := range m.orderbooks {
 		ob.Clear()
 	}
-	// Clear all pending diffs
 	m.pendingDiffs = make(map[string][]*SingleDepthDiffMessage)
 }
 
@@ -690,7 +697,6 @@ func (m *Manager) GetPendingDiffCount(tokenID string) int {
 }
 
 // ClearPendingDiffs clears pending diffs for a token
-// 在获取快照前调用，确保只保留快照获取期间和之后的 diff
 func (m *Manager) ClearPendingDiffs(tokenID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -698,7 +704,6 @@ func (m *Manager) ClearPendingDiffs(tokenID string) {
 }
 
 // RegisterMarketTokenPair registers a YES/NO token pair for a market
-// This enables mirror sync between YES and NO orderbooks
 func (m *Manager) RegisterMarketTokenPair(pair *MarketTokenPair) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -728,7 +733,6 @@ func (m *Manager) GetAllMarketTokenPairs() []*MarketTokenPair {
 }
 
 // MarkUninitialized marks an orderbook as uninitialized
-// Used when reconnecting to trigger snapshot refresh
 func (m *Manager) MarkUninitialized(tokenID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
