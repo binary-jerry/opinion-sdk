@@ -101,6 +101,19 @@ func (m *Manager) handleStateChange(state ConnectionState) {
 
 // handleMessage handles WebSocket messages (callback from WSClient)
 func (m *Manager) handleMessage(data []byte) {
+	// First try to parse as heartbeat response: {"code": 200, "message": "HEARTBEAT"}
+	var heartbeatResp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(data, &heartbeatResp); err == nil {
+		if heartbeatResp.Code == 200 && heartbeatResp.Message == "HEARTBEAT" {
+			m.wsClient.UpdateHeartbeatResponse()
+			return
+		}
+	}
+
+	// Parse as regular message
 	var msg struct {
 		MsgType string `json:"msgType"`
 	}

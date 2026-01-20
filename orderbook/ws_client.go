@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,9 @@ type WSClient struct {
 	reconnectAttempts int32
 	reconnecting      int32 // atomic flag to prevent multiple reconnects
 	lastError         error
+
+	// Heartbeat control
+	lastHeartbeatResp time.Time
 }
 
 // NewWSClient creates a new WebSocket client
@@ -100,6 +104,11 @@ func (c *WSClient) Connect(ctx context.Context) error {
 	c.setState(StateConnected)
 	atomic.StoreInt32(&c.reconnectAttempts, 0)
 	atomic.StoreInt32(&c.reconnecting, 0)
+
+	// Initialize heartbeat response time
+	c.mu.Lock()
+	c.lastHeartbeatResp = time.Now()
+	c.mu.Unlock()
 
 	// Create new loop context
 	c.mu.Lock()
@@ -375,11 +384,14 @@ func (c *WSClient) writeLoop() {
 
 func (c *WSClient) heartbeatLoop() {
 	defer c.loopWg.Done()
+	defer c.triggerReconnect() // Trigger reconnect if heartbeat loop exits
 
 	interval := time.Duration(c.config.HeartbeatInterval) * time.Second
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
+	// Heartbeat response timeout: 2x interval
+	timeout := interval * 2
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -398,17 +410,40 @@ func (c *WSClient) heartbeatLoop() {
 			c.mu.RLock()
 			state := c.state
 			conn := c.conn
+			lastResp := c.lastHeartbeatResp
 			c.mu.RUnlock()
 
 			if state != StateConnected || conn == nil {
 				continue
 			}
 
+			// Check heartbeat response timeout
+			timeSinceLastResp := time.Since(lastResp)
+			if timeSinceLastResp > timeout {
+				c.lastError = fmt.Errorf("heartbeat response timeout, last response: %v ago (timeout: %v)",
+					timeSinceLastResp.Round(time.Second), timeout)
+				return // Exit loop, triggering reconnect
+			}
+
+			// Send heartbeat
 			msg := HeartbeatMessage{Action: ActionHeartbeat}
 			data, _ := json.Marshal(msg)
-			c.write(data)
+			if err := c.write(data); err != nil {
+				c.lastError = fmt.Errorf("failed to send heartbeat: %w", err)
+				return
+			}
+			log.Printf("[Opinion WSClient] sent heartbeat, last response: %v ago", timeSinceLastResp.Round(time.Second))
 		}
 	}
+}
+
+// UpdateHeartbeatResponse updates the last heartbeat response time
+// Should be called by Manager when receiving heartbeat response
+func (c *WSClient) UpdateHeartbeatResponse() {
+	c.mu.Lock()
+	c.lastHeartbeatResp = time.Now()
+	c.mu.Unlock()
+	log.Printf("[Opinion WSClient] received heartbeat response")
 }
 
 // triggerReconnect triggers reconnection (ensures only triggered once)
