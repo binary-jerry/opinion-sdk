@@ -61,7 +61,7 @@ func (c *Client) PlaceOrder(ctx context.Context, req *CreateOrderRequest) (*Plac
 	}
 
 	var resp PlaceOrderResponse
-	err = c.httpClient.Post(ctx, "/order", body, &resp)
+	err = c.httpClient.Post(ctx, "/openapi/order", body, &resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to place order: %w", err)
 	}
@@ -117,7 +117,7 @@ func (c *Client) PlaceOrdersBatch(ctx context.Context, reqs []*CreateOrderReques
 	return resp.Result, nil
 }
 
-// GetOrder 获取订单详情
+// GetOrder 获取订单详情（旧方法，保留兼容）
 func (c *Client) GetOrder(ctx context.Context, orderID string) (*Order, error) {
 	if orderID == "" {
 		return nil, fmt.Errorf("order ID is required")
@@ -136,7 +136,7 @@ func (c *Client) GetOrder(ctx context.Context, orderID string) (*Order, error) {
 	return resp.Result, nil
 }
 
-// GetOrders 获取订单列表
+// GetOrders 获取订单列表（旧方法，保留兼容）
 func (c *Client) GetOrders(ctx context.Context, params *OrderListParams) ([]*Order, error) {
 	if params == nil {
 		params = &OrderListParams{
@@ -158,6 +158,56 @@ func (c *Client) GetOrders(ctx context.Context, params *OrderListParams) ([]*Ord
 	return resp.Result.Orders, nil
 }
 
+// GetMyOrders 获取用户的订单列表
+// 对应 Python SDK 的 get_my_orders()
+// 需要 API Key 认证
+func (c *Client) GetMyOrders(ctx context.Context, params *MyOrdersParams) ([]*MyOrder, int, error) {
+	if params == nil {
+		params = &MyOrdersParams{
+			Page:  1,
+			Limit: 10,
+		}
+	}
+
+	// 设置 chain_id
+	if params.ChainID == "" {
+		params.ChainID = strconv.Itoa(c.chainID)
+	}
+
+	var resp MyOrdersResponse
+	err := c.httpClient.Get(ctx, "/openapi/order", params, &resp)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get my orders: %w", err)
+	}
+
+	if resp.Errno != 0 {
+		return nil, 0, fmt.Errorf("API error (errno=%d): %s", resp.Errno, resp.Errmsg)
+	}
+
+	return resp.Result.List, resp.Result.Total, nil
+}
+
+// GetOrderByID 根据订单 ID 获取订单详情（包含关联交易记录）
+// 对应 Python SDK 的 get_order_by_id()
+// 需要 API Key 认证
+func (c *Client) GetOrderByID(ctx context.Context, orderID string) (*MyOrderDetail, error) {
+	if orderID == "" {
+		return nil, fmt.Errorf("order ID is required")
+	}
+
+	var resp MyOrderDetailResponse
+	err := c.httpClient.Get(ctx, "/openapi/order/"+orderID, nil, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get order by id: %w", err)
+	}
+
+	if resp.Errno != 0 {
+		return nil, fmt.Errorf("API error (errno=%d): %s", resp.Errno, resp.Errmsg)
+	}
+
+	return resp.Result.OrderData, nil
+}
+
 // CancelOrder 取消订单
 func (c *Client) CancelOrder(ctx context.Context, orderID string) error {
 	if orderID == "" {
@@ -169,7 +219,7 @@ func (c *Client) CancelOrder(ctx context.Context, orderID string) error {
 	}
 
 	var resp APIResponse
-	err := c.httpClient.Post(ctx, "/order/cancel", body, &resp)
+	err := c.httpClient.Post(ctx, "/openapi/order/cancel", body, &resp)
 	if err != nil {
 		return fmt.Errorf("failed to cancel order: %w", err)
 	}
@@ -260,7 +310,7 @@ func (c *Client) SubmitPreSignedOrder(ctx context.Context, preSignedOrder *PreSi
 	}
 
 	var resp PlaceOrderResponse
-	err := c.httpClient.Post(ctx, "/order", preSignedOrder.RequestBody, &resp)
+	err := c.httpClient.Post(ctx, "/openapi/order", preSignedOrder.RequestBody, &resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to submit pre-signed order: %w", err)
 	}

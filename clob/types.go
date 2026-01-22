@@ -270,3 +270,180 @@ type TxResponse struct {
 type EnableTradingRequest struct {
 	QuoteTokenID string `json:"quoteTokenId"`
 }
+
+// ===============================
+// 用户交易历史和订单相关类型
+// 对应 Python SDK 的 get_my_trades / get_my_orders / get_order_by_id
+// ===============================
+
+// MyTradesParams 用户交易历史查询参数
+type MyTradesParams struct {
+	MarketID int    `url:"market_id,omitempty"`
+	Page     int    `url:"page,omitempty"`
+	Limit    int    `url:"limit,omitempty"`
+	ChainID  string `url:"chain_id,omitempty"`
+}
+
+// MyTrade 用户交易记录（Opinion API 格式）
+// 字段名称和类型与真实 API 响应一致（2026-01-22 验证）
+type MyTrade struct {
+	// 交易标识
+	OrderNo string `json:"orderNo,omitempty"` // 订单号
+	TradeNo string `json:"tradeNo,omitempty"` // 交易号
+	TxHash  string `json:"txHash,omitempty"`  // 链上交易哈希
+
+	// 市场信息
+	MarketID        int    `json:"marketId,omitempty"`        // 市场 ID
+	MarketTitle     string `json:"marketTitle,omitempty"`     // 市场标题
+	RootMarketID    int    `json:"rootMarketId,omitempty"`    // 根市场 ID
+	RootMarketTitle string `json:"rootMarketTitle,omitempty"` // 根市场标题
+
+	// 交易方向
+	Side           string `json:"side,omitempty"`           // "Buy" 或 "Sell" (字符串!)
+	Outcome        string `json:"outcome,omitempty"`        // "YES" 或 "NO"
+	OutcomeSide    int    `json:"outcomeSide,omitempty"`    // 1=yes, 2=no
+	OutcomeSideEnum string `json:"outcomeSideEnum,omitempty"` // "Yes" 或 "No"
+
+	// 价格和数量
+	Price              string `json:"price,omitempty"`              // 成交价格
+	Shares             string `json:"shares,omitempty"`             // 成交份额
+	Amount             string `json:"amount,omitempty"`             // 成交金额 (USDT)
+	Fee                int64  `json:"fee,omitempty"`                // 手续费 (原始值，可能为负数)
+	FeeFormatted       string `json:"feeFormatted,omitempty"`       // 格式化手续费
+	Profit             string `json:"profit,omitempty"`             // 利润
+	QuoteToken         string `json:"quoteToken,omitempty"`         // 报价代币地址
+	QuoteTokenUsdPrice string `json:"quoteTokenUsdPrice,omitempty"` // 报价代币美元价格
+	UsdAmount          string `json:"usdAmount,omitempty"`          // 美元金额
+
+	// 状态
+	Status     int    `json:"status,omitempty"`     // 2=finished
+	StatusEnum string `json:"statusEnum,omitempty"` // "Finished"
+
+	// 其他
+	ChainID   string `json:"chainId,omitempty"`   // 链 ID (字符串)
+	CreatedAt int64  `json:"createdAt,omitempty"` // 创建时间戳
+}
+
+// MyTradesResponse 用户交易历史响应（列表格式）
+type MyTradesResponse struct {
+	Errno  int    `json:"errno"`
+	Errmsg string `json:"errmsg"`
+	Result struct {
+		List  []*MyTrade `json:"list"`
+		Total int        `json:"total"`
+	} `json:"result"`
+}
+
+// MyOrdersParams 用户订单列表查询参数
+type MyOrdersParams struct {
+	MarketID int    `url:"market_id,omitempty"`
+	Status   string `url:"status,omitempty"`   // 1=pending, 2=finished, 3=canceled, 4=expired, 5=failed
+	Page     int    `url:"page,omitempty"`
+	Limit    int    `url:"limit,omitempty"`
+	ChainID  string `url:"chain_id,omitempty"`
+}
+
+// MyOrder 用户订单（Opinion API 格式）
+// 字段名称和类型与真实 API 响应一致（2026-01-22 验证）
+type MyOrder struct {
+	// 订单标识
+	OrderID string `json:"orderId,omitempty"` // 订单 ID
+	TransNo string `json:"transNo,omitempty"` // 交易号
+
+	// 状态
+	Status     int    `json:"status,omitempty"`     // 1=pending, 2=finished, 3=canceled, 4=expired, 5=failed
+	StatusEnum string `json:"statusEnum,omitempty"` // "Finished", "Pending" 等
+
+	// 市场信息
+	MarketID        int    `json:"marketId,omitempty"`        // 市场 ID
+	MarketTitle     string `json:"marketTitle,omitempty"`     // 市场标题
+	RootMarketID    int    `json:"rootMarketId,omitempty"`    // 根市场 ID
+	RootMarketTitle string `json:"rootMarketTitle,omitempty"` // 根市场标题
+
+	// 交易方向 (注意: 订单 API 返回数字，交易 API 返回字符串)
+	Side              int    `json:"side,omitempty"`              // 1=buy, 2=sell (数字)
+	SideEnum          string `json:"sideEnum,omitempty"`          // "Buy" 或 "Sell"
+	TradingMethod     int    `json:"tradingMethod,omitempty"`     // 1=market, 2=limit
+	TradingMethodEnum string `json:"tradingMethodEnum,omitempty"` // "Market" 或 "Limit"
+	Outcome           string `json:"outcome,omitempty"`           // "YES" 或 "NO"
+	OutcomeSide       int    `json:"outcomeSide,omitempty"`       // 1=yes, 2=no
+	OutcomeSideEnum   string `json:"outcomeSideEnum,omitempty"`   // "Yes" 或 "No"
+
+	// 价格和数量
+	Price        string `json:"price,omitempty"`        // 订单价格
+	OrderShares  string `json:"orderShares,omitempty"`  // 订单份额
+	OrderAmount  string `json:"orderAmount,omitempty"`  // 订单金额 (USDT)
+	FilledShares string `json:"filledShares,omitempty"` // 已成交份额
+	FilledAmount string `json:"filledAmount,omitempty"` // 已成交金额
+	Profit       string `json:"profit,omitempty"`       // 利润
+	QuoteToken   string `json:"quoteToken,omitempty"`   // 报价代币地址
+
+	// 时间
+	CreatedAt int64 `json:"createdAt,omitempty"` // 创建时间戳
+	ExpiresAt int64 `json:"expiresAt,omitempty"` // 过期时间戳
+
+	// 关联交易
+	Trades []interface{} `json:"trades,omitempty"` // 关联的交易列表
+}
+
+// MyOrdersResponse 用户订单列表响应
+type MyOrdersResponse struct {
+	Errno  int    `json:"errno"`
+	Errmsg string `json:"errmsg"`
+	Result struct {
+		List  []*MyOrder `json:"list"`
+		Total int        `json:"total"`
+	} `json:"result"`
+}
+
+// MyOrderDetailResponse 用户订单详情响应
+// 注意：API 返回的 result 中有 orderData 包装层
+type MyOrderDetailResponse struct {
+	Errno  int    `json:"errno"`
+	Errmsg string `json:"errmsg"`
+	Result struct {
+		OrderData *MyOrderDetail `json:"orderData"`
+	} `json:"result"`
+}
+
+// MyOrderDetail 订单详情（包含关联交易记录）
+type MyOrderDetail struct {
+	// 订单标识
+	OrderID string `json:"orderId,omitempty"` // 订单 ID
+	TransNo string `json:"transNo,omitempty"` // 交易号
+
+	// 状态
+	Status     int    `json:"status,omitempty"`     // 1=pending, 2=finished, 3=canceled, 4=expired, 5=failed
+	StatusEnum string `json:"statusEnum,omitempty"` // "Finished", "Pending" 等
+
+	// 市场信息
+	MarketID        int    `json:"marketId,omitempty"`        // 市场 ID
+	MarketTitle     string `json:"marketTitle,omitempty"`     // 市场标题
+	RootMarketID    int    `json:"rootMarketId,omitempty"`    // 根市场 ID
+	RootMarketTitle string `json:"rootMarketTitle,omitempty"` // 根市场标题
+
+	// 交易方向
+	Side              int    `json:"side,omitempty"`              // 1=buy, 2=sell (数字)
+	SideEnum          string `json:"sideEnum,omitempty"`          // "Buy" 或 "Sell"
+	TradingMethod     int    `json:"tradingMethod,omitempty"`     // 1=market, 2=limit
+	TradingMethodEnum string `json:"tradingMethodEnum,omitempty"` // "Market" 或 "Limit"
+	Outcome           string `json:"outcome,omitempty"`           // "YES" 或 "NO"
+	OutcomeSide       int    `json:"outcomeSide,omitempty"`       // 1=yes, 2=no
+	OutcomeSideEnum   string `json:"outcomeSideEnum,omitempty"`   // "Yes" 或 "No"
+
+	// 价格和数量
+	Price        string `json:"price,omitempty"`        // 订单价格
+	OrderShares  string `json:"orderShares,omitempty"`  // 订单份额
+	OrderAmount  string `json:"orderAmount,omitempty"`  // 订单金额 (USDT)
+	FilledShares string `json:"filledShares,omitempty"` // 已成交份额
+	FilledAmount string `json:"filledAmount,omitempty"` // 已成交金额
+	Profit       string `json:"profit,omitempty"`       // 利润
+	QuoteToken   string `json:"quoteToken,omitempty"`   // 报价代币地址
+
+	// 时间
+	CreatedAt int64 `json:"createdAt,omitempty"` // 创建时间戳
+	ExpiresAt int64 `json:"expiresAt,omitempty"` // 过期时间戳
+
+	// 关联交易记录
+	Trades []*MyTrade `json:"trades,omitempty"`
+}

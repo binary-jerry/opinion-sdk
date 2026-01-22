@@ -123,8 +123,63 @@ if sdk.IsOrderBookInitialized(tokenID) {
 - `github.com/shopspring/decimal`: 精确十进制运算
 - `github.com/gorilla/websocket`: WebSocket 连接
 
+## 官方 SDK 参考规范
+
+**开发 Golang 版本的 SDK 相关功能时，必须先阅读官方提供的 Python 版本 SDK 作为参考。**
+
+### Opinion 官方 Python SDK 目录
+```
+/Users/houjie/web3/polymarket/predict-arb/vendor-sdk/opinion_clob_sdk
+```
+
+### 开发流程
+1. **先阅读官方 SDK**: 在实现任何 SDK 功能前，必须先查看 `vendor-sdk` 目录中对应的官方实现
+2. **严格遵循官方逻辑**: 实现方式必须与官方 SDK 保持一致，包括：
+   - API 调用方式
+   - 签名算法
+   - 数据结构
+   - 错误处理
+3. **记录差异**: 如果因语言特性需要调整，需在代码注释中说明与官方实现的差异
+
 ## Smart Contract Operations
 
 - **Split**: 将 USDT 拆分为 YES + NO 代币
 - **Merge**: 将 YES + NO 代币合并为 USDT
 - **Redeem**: 从已结算市场赎回收益
+
+## 单元测试规范
+
+**所有完成的功能必须完成单元测试才能交付。**
+
+### 测试文件规范
+- 测试文件必须以 `_test.go` 结尾（例如 `orderbook_test.go`）
+- 测试文件与被测试文件放在同一目录下
+- **禁止**单独编写 `main.go` 文件进行测试
+
+### 测试命名规范
+```go
+// 测试函数命名
+func TestFunctionName(t *testing.T)           // 基本测试
+func TestFunctionName_Scenario(t *testing.T)  // 场景测试
+func TestType_MethodName(t *testing.T)        // 方法测试
+
+// 示例
+func TestOrderBook_ApplyDiff(t *testing.T)
+func TestManager_MirrorSync(t *testing.T)
+func TestWSClient_Reconnect(t *testing.T)
+```
+
+### 测试运行
+```bash
+go test ./...                                    # 全部测试
+go test ./orderbook/... -v                       # 单个包
+go test ./orderbook/... -run TestOrderBook       # 单个测试
+go test ./... -cover                             # 带覆盖率
+go test ./... -race                              # 竞态检测
+```
+
+### 交付检查清单
+- [ ] 新功能已编写对应的 `_test.go` 文件
+- [ ] 测试覆盖主要逻辑路径和边界条件
+- [ ] `go test ./...` 全部通过
+- [ ] 未使用 `main.go` 进行测试
